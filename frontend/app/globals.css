@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dark-first, matching the gc-website design language: near-black surfaces,
+   a single accent, generous borders. */
+@layer base {
+  :root {
+    --background: 0 0% 4%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 7%;
+    --border: 0 0% 16%;
+    --muted: 0 0% 11%;
+    --muted-foreground: 0 0% 63%;
+    --primary: 25 95% 53%;
+    --primary-foreground: 0 0% 8%;
+    --success: 142 70% 45%;
+    --warning: 38 92% 50%;
+    --danger: 0 72% 55%;
+  }
+
+  * {
+    border-color: hsl(var(--border));
+  }
+
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-lg border border-border bg-card p-5;
+  }
+
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-foreground;
+  }
+
+  .hint {
+    @apply mt-1.5 text-xs leading-relaxed text-muted-foreground;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground
+           placeholder:text-muted-foreground focus:border-primary focus:outline-none;
+  }
+
+  .table-wrap {
+    @apply overflow-x-auto rounded-lg border border-border;
+  }
+
+  table.data {
+    @apply w-full border-collapse text-sm;
+  }
+
+  table.data th {
+    @apply whitespace-nowrap border-b border-border bg-muted px-3 py-2 text-left
+           text-xs font-semibold uppercase tracking-wide text-muted-foreground;
+  }
+
+  table.data td {
+    @apply border-b border-border px-3 py-2 align-top;
+  }
+
+  table.data tr:last-child td {
+    @apply border-b-0;
+  }
+}

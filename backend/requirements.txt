@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+motor
+pydantic[email]>=2
+pydantic-settings
+python-dotenv
+python-multipart
+httpx
+bcrypt
+cryptography
+arq
+redis
+feedparser
+beautifulsoup4
+anthropic
+google-auth
+google-api-python-client

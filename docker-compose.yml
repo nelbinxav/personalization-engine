@@ -1,0 +1,64 @@
+services:
+  api:
+    build: ./backend
+    container_name: pe-api
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      MONGODB_URL: mongodb://mongo:27017
+      REDIS_URL: redis://redis:6379
+      ANTHROPIC_CONFIG_DIR: /var/lib/anthropic
+    ports:
+      - "8000:8000"
+    depends_on: [mongo, redis]
+    volumes:
+      - ./backend/app:/app/app
+      - anthropic_profile:/var/lib/anthropic
+
+  worker:
+    build: ./backend
+    container_name: pe-worker
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      MONGODB_URL: mongodb://mongo:27017
+      REDIS_URL: redis://redis:6379
+      ANTHROPIC_CONFIG_DIR: /var/lib/anthropic
+    depends_on: [mongo, redis]
+    volumes:
+      - ./backend/app:/app/app
+      # Same volume as the api: the OAuth profile written by the connect flow
+      # has to be readable by the process that actually spends tokens.
+      - anthropic_profile:/var/lib/anthropic
+    command: ["arq", "app.worker.main.WorkerSettings"]
+
+  frontend:
+    build: ./frontend
+    container_name: pe-frontend
+    restart: unless-stopped
+    environment:
+      # Browser-side calls, so this is the URL as the browser sees it.
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on: [api]
+
+  mongo:
+    image: mongo:7
+    container_name: pe-mongo
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+
+  redis:
+    image: redis:7-alpine
+    container_name: pe-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+
+volumes:
+  mongo_data:
+  redis_data:
+  anthropic_profile:
