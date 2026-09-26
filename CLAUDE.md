@@ -85,6 +85,19 @@ warning. Relatedly, the channel template is injected into the stage-3 prompt
 **unrendered**, placeholders intact, for the same reason - `render()` is
 single-pass so they survive, and the model fills them from the user turn.
 
+### Subscription mode (`claude_code`)
+
+The third credential mode runs each stage through the operator's own Claude
+subscription by calling the **unmodified** Claude Code binary (`claude -p`,
+tools off, `--json-schema`) in `app/ai/claude_code.py`. The operator signs in
+themselves with `docker compose exec -it worker claude auth login`; the
+credential lives in the `claude_code_profile` volume and the app never reads
+it. **Do not replace this with an in-app Claude.ai OAuth flow or read the stored
+token** - Anthropic forbids third-party apps from holding subscription
+credentials, and running the unmodified binary is what keeps this permitted.
+A plan usage limit raises `UsageLimitReached` and parks the job like an auth
+failure, but its message says "wait", not "reconnect".
+
 ### Layout
 
 ```
@@ -95,8 +108,35 @@ backend/app/
   ai/                 client (credentials/OAuth), chain, schemas, defaults, pricing
   worker/             main (arq WorkerSettings), tasks, bookkeeping
   export/             csv_writer (streaming)
-frontend/app/(app)/   uploads, jobs, prompts, templates, settings
+frontend/app/(app)/   overview, uploads, uploads/[id], uploads/new, jobs, jobs/[id],
+                      prompts, templates, settings
+frontend/components/  ui/ (design system + toast), launch-job (shared job launcher)
+frontend/lib/         api, types, workflow (next-step logic, readiness checks, formatting)
+deploy/               TAILSCALE.md (private hosting guide), backup.sh
 ```
+
+### Frontend workflow
+
+Each upload's page (`uploads/[id]`) is the hub: Import -> Research ->
+Personalize -> Download, with the next step preselected by
+`workflow.nextAction()`. `LaunchJob` is the only place jobs are queued, and
+`useReadiness().blockersFor()` blocks a launch that would fail every row (no
+Claude, empty offer text, no active template for the channel). Two frontend
+copies of backend rules must stay in sync: `mappingProblems()` mirrors
+`ingest/mapping.validate_mapping`, and the prompts page's `PER_ROW` regex
+mirrors `chain._VOLATILE_TOKEN`. Colours are HSL tokens in `globals.css`
+with light and dark sets; `info` (blue) means in progress and `warning`
+(amber) means needs a look, so keep them apart in hue.
+
+### Deployment
+
+- `NEXT_PUBLIC_API_URL` is a **build arg**: Next.js inlines it into the bundle.
+  Changing it means rebuilding the frontend; setting it at runtime does nothing.
+- The api and frontend ports publish on `${BIND_ADDRESS:-127.0.0.1}`. Docker
+  ports bypass the host firewall, so never default them to `0.0.0.0`; a
+  Tailscale serve or tunnel on the host proxies to loopback instead.
+- Backups need the database **and** `.env`: provider keys are encrypted with
+  `APP_SECRET_KEY`.
 
 ### Adding a scraping source
 

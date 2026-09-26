@@ -37,14 +37,28 @@ RUN set -eux; \
         echo "WARNING: could not resolve an ant CLI release; OAuth mode will be unavailable."; \
     fi
 
+# Claude Code, installed unmodified from Anthropic's own installer, for the
+# `claude_code` credential mode (the operator's own Claude subscription). Same
+# non-fatal policy as `ant`: the image still builds without it, and Settings
+# reports the mode as unavailable. Never patch or wrap this binary -- running it
+# unmodified is what makes subscription use permissible.
+RUN set -eux; \
+    if curl -fsSL https://claude.ai/install.sh | bash; then \
+        ln -sf "$(readlink -f /root/.local/bin/claude)" /usr/local/bin/claude; \
+        claude --version; \
+    else \
+        echo "WARNING: could not install Claude Code; subscription mode will be unavailable."; \
+    fi
+
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY . .
 
 # Profile volume, shared with the worker so both see the same credential.
-ENV ANTHROPIC_CONFIG_DIR=/var/lib/anthropic
-RUN mkdir -p /var/lib/anthropic
+ENV ANTHROPIC_CONFIG_DIR=/var/lib/anthropic \
+    CLAUDE_CONFIG_DIR=/var/lib/claude-code
+RUN mkdir -p /var/lib/anthropic /var/lib/claude-code
 
 EXPOSE 8000
 

@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from app.ai import pricing
+from app.ai import claude_code, pricing
 from app.ai.client import (
     AuthUnavailable,
     ant_available,
@@ -120,6 +120,7 @@ async def ai_status() -> dict:
         "organization": status_info.organization,
         "workspace": status_info.workspace,
         "ant_installed": ant_available(),
+        "claude_code_installed": claude_code.available(),
         "api_key_in_env": api_key_is_set(),
         "warning": warning,
         "model": settings.ai.model,

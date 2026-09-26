@@ -1,23 +1,49 @@
 'use client'
 
+import { ArrowLeft, ArrowRight, FileUp, Link2, Sheet, UploadCloud, X } from 'lucide-react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
-import { Alert, Button, Card, Input, PageHeader, Select } from '@/components/ui'
+import {
+  Alert,
+  Button,
+  Card,
+  CardHeader,
+  Field,
+  Input,
+  PageHeader,
+  Segmented,
+  Select,
+  Stepper,
+  cn,
+  toast,
+} from '@/components/ui'
 import { api } from '@/lib/api'
-import type { UploadPreview } from '@/lib/types'
+import type { Upload, UploadPreview } from '@/lib/types'
+import { FIELD_META, IDENTIFIER_FIELDS, TARGET_FIELDS, mappingProblems } from '@/lib/workflow'
 
 const UNMAPPED = ''
 
-// Fields the scraping engine and the prompts actually read.
-const FIELD_HELP: Record<string, string> = {
-  full_name: 'Used to address the message.',
-  first_name: 'Preferred in greetings.',
-  company: 'Drives the Google News search.',
-  website: 'Scraped for site content and an RSS feed.',
-  linkedin_url: 'Scraped for the personal profile.',
-  linkedin_company_url: 'Scraped for the company page.',
-}
+// Mapping grouped by what the field is for, so the "at least one of" rules
+// read as a sentence rather than a list of eleven selects.
+const GROUPS = [
+  {
+    title: 'Who they are',
+    description: 'Map at least one of full name, first name or company.',
+    fields: ['full_name', 'first_name', 'last_name', 'title', 'company'],
+  },
+  {
+    title: 'Where to research',
+    description: 'Map at least one: this is what the scrapers fetch.',
+    fields: ['website', 'linkedin_url', 'linkedin_company_url'],
+  },
+  {
+    title: 'Contact details',
+    description: 'Optional. Carried through to the export.',
+    fields: ['email', 'phone', 'location'],
+  },
+]
 
 export default function NewUploadPage() {
   const router = useRouter()
@@ -25,6 +51,8 @@ export default function NewUploadPage() {
   const [sheetUrl, setSheetUrl] = useState('')
   const [sheetTab, setSheetTab] = useState('')
   const [file, setFile] = useState<File | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const fileInput = useRef<HTMLInputElement>(null)
 
   const [preview, setPreview] = useState<UploadPreview | null>(null)
   const [fields, setFields] = useState<string[]>([])
@@ -52,7 +80,7 @@ export default function NewUploadPage() {
         const form = new FormData()
         form.append('file', file)
         result = await api.upload<UploadPreview>('/uploads/preview/csv', form)
-        setName(file.name.replace(/\.csv$/i, ''))
+        setName(file.name.replace(/\.(csv|tsv)$/i, ''))
       } else {
         result = await api.post<UploadPreview>('/uploads/preview/sheet', {
           sheet_url: sheetUrl,
@@ -74,12 +102,13 @@ export default function NewUploadPage() {
     setBusy(true)
     setError(null)
     try {
-      await api.post('/uploads/commit', {
+      const upload = await api.post<Upload>('/uploads/commit', {
         staging_id: preview.staging_id,
         name,
         column_mapping: mapping,
       })
-      router.push('/uploads')
+      toast.success(`Imported ${upload.row_count} rows.`)
+      router.push(`/uploads/${upload.id}?phase=scrape`)
     } catch (err: any) {
       setError(err.message)
       setBusy(false)
@@ -93,78 +122,174 @@ export default function NewUploadPage() {
     return owner ? owner[0] : null
   }
 
+  function pickFile(next: File | undefined | null) {
+    if (!next) return
+    if (!/\.(csv|tsv|txt)$/i.test(next.name)) {
+      setError('That does not look like a CSV. Export the sheet as .csv and try again.')
+      return
+    }
+    setError(null)
+    setFile(next)
+  }
+
+  const problems = preview ? mappingProblems(mapping) : []
+  const mappedColumns = new Set(Object.values(mapping))
+  const sample = preview?.sample_rows.find((row) => Object.values(row).some(Boolean))
+  const grouped = new Set(GROUPS.flatMap((g) => g.fields))
+  const extraFields = fields.filter((f) => !grouped.has(f))
+
   return (
     <>
       <PageHeader
+        eyebrow={
+          <Link href="/uploads" className="inline-flex items-center gap-1.5 hover:text-foreground">
+            <ArrowLeft className="h-3.5 w-3.5" /> Uploads
+          </Link>
+        }
         title="New upload"
-        description="Load the rows, then confirm which column means what. The mapping is remembered for the next sheet with the same headers."
+        description="Load your prospects, confirm which column is which, then research them."
       />
 
-      {error && (
-        <div className="mb-4">
-          <Alert>{error}</Alert>
-        </div>
-      )}
+      <Card className="mb-6 px-6 py-5">
+        <Stepper
+          steps={[
+            { label: 'Choose a source', description: 'CSV or Google Sheet', state: preview ? 'done' : 'current' },
+            {
+              label: 'Match the columns',
+              description: 'Remembered for next time',
+              state: preview ? 'current' : 'upcoming',
+            },
+            { label: 'Research', description: 'Try 3 rows first', state: 'upcoming' },
+          ]}
+        />
+      </Card>
+
+      {error && <Alert className="mb-6">{error}</Alert>}
 
       {!preview && (
         <Card className="max-w-2xl">
-          <div className="mb-4 flex gap-2">
-            <Button variant={mode === 'csv' ? 'primary' : 'secondary'} size="sm" onClick={() => setMode('csv')}>
-              Upload CSV
-            </Button>
-            <Button variant={mode === 'sheet' ? 'primary' : 'secondary'} size="sm" onClick={() => setMode('sheet')}>
-              Google Sheet URL
-            </Button>
-          </div>
+          <Segmented
+            label="Source"
+            value={mode}
+            onChange={setMode}
+            className="mb-6"
+            options={[
+              {
+                value: 'csv',
+                label: (
+                  <>
+                    <FileUp className="h-4 w-4" /> CSV file
+                  </>
+                ),
+              },
+              {
+                value: 'sheet',
+                label: (
+                  <>
+                    <Sheet className="h-4 w-4" /> Google Sheet
+                  </>
+                ),
+              },
+            ]}
+          />
 
-          <form onSubmit={loadPreview} className="space-y-4">
+          <form onSubmit={loadPreview} className="space-y-5">
             {mode === 'csv' ? (
               <div>
-                <label className="label" htmlFor="file">
-                  CSV file
-                </label>
                 <input
+                  ref={fileInput}
                   id="file"
                   type="file"
                   accept=".csv,.tsv,text/csv"
-                  onChange={(e) => setFile(e.target.files?.[0] || null)}
-                  className="input file:mr-3 file:rounded file:border-0 file:bg-border file:px-3 file:py-1 file:text-xs file:text-foreground"
+                  className="sr-only"
+                  onChange={(e) => pickFile(e.target.files?.[0])}
                 />
-                <p className="hint">Comma, semicolon and tab separated files all work. Max 25MB.</p>
+                {file ? (
+                  <div className="flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-4 py-3">
+                    <FileUp className="h-5 w-5 shrink-0 text-primary" />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">{file.name}</p>
+                      <p className="text-xs text-muted-foreground">{(file.size / 1024).toFixed(0)} KB</p>
+                    </div>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      aria-label="Remove file"
+                      onClick={() => {
+                        setFile(null)
+                        if (fileInput.current) fileInput.current.value = ''
+                      }}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ) : (
+                  <label
+                    htmlFor="file"
+                    onDragOver={(e) => {
+                      e.preventDefault()
+                      setDragging(true)
+                    }}
+                    onDragLeave={() => setDragging(false)}
+                    onDrop={(e) => {
+                      e.preventDefault()
+                      setDragging(false)
+                      pickFile(e.dataTransfer.files?.[0])
+                    }}
+                    className={cn(
+                      'flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-12 text-center transition-colors',
+                      dragging
+                        ? 'border-primary bg-primary/[0.06]'
+                        : 'border-border-strong/60 hover:border-primary/60 hover:bg-muted/40',
+                    )}
+                  >
+                    <UploadCloud className={cn('h-8 w-8', dragging ? 'text-primary' : 'text-muted-foreground')} />
+                    <p className="mt-3 text-sm font-medium">Drop a CSV here, or click to browse</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Comma, semicolon and tab separated all work. Max 25MB.
+                    </p>
+                  </label>
+                )}
               </div>
             ) : (
               <>
-                <div>
-                  <label className="label" htmlFor="sheet">
-                    Sheet URL
-                  </label>
-                  <Input
-                    id="sheet"
-                    placeholder="https://docs.google.com/spreadsheets/d/..."
-                    value={sheetUrl}
-                    onChange={(e) => setSheetUrl(e.target.value)}
-                  />
-                  <p className="hint">
-                    Either set link sharing to &quot;Anyone with the link&quot;, or share the sheet with the
-                    service account configured in Settings.
-                  </p>
-                </div>
-                <div>
-                  <label className="label" htmlFor="tab">
-                    Tab name (optional)
-                  </label>
-                  <Input
-                    id="tab"
-                    placeholder="Sheet1"
-                    value={sheetTab}
-                    onChange={(e) => setSheetTab(e.target.value)}
-                  />
-                </div>
+                <Field
+                  id="sheet"
+                  label="Sheet URL"
+                  hint={
+                    <>
+                      Set link sharing to “Anyone with the link”, or share the sheet with the service account in{' '}
+                      <Link href="/settings#keys" className="link">
+                        Settings
+                      </Link>
+                      .
+                    </>
+                  }
+                >
+                  <div className="relative">
+                    <Link2 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      id="sheet"
+                      className="pl-9"
+                      placeholder="https://docs.google.com/spreadsheets/d/…"
+                      value={sheetUrl}
+                      onChange={(e) => setSheetUrl(e.target.value)}
+                    />
+                  </div>
+                </Field>
+                <Field id="tab" label="Tab name" aside={<span className="text-xs text-muted-foreground">Optional</span>} hint="Defaults to the first tab.">
+                  <Input id="tab" placeholder="Sheet1" value={sheetTab} onChange={(e) => setSheetTab(e.target.value)} />
+                </Field>
               </>
             )}
 
-            <Button type="submit" disabled={busy}>
-              {busy ? 'Loading...' : 'Load rows'}
+            <Button
+              type="submit"
+              loading={busy}
+              disabled={mode === 'csv' ? !file : !sheetUrl.trim()}
+            >
+              {busy ? 'Reading rows' : 'Continue'}
+              {!busy && <ArrowRight className="h-4 w-4" />}
             </Button>
           </form>
         </Card>
@@ -174,72 +299,110 @@ export default function NewUploadPage() {
         <div className="space-y-6">
           <Card>
             <div className="flex flex-wrap items-end justify-between gap-4">
-              <div className="min-w-64 flex-1">
-                <label className="label" htmlFor="name">
-                  Upload name
-                </label>
+              <Field id="name" label="Name this upload" className="min-w-64 flex-1">
                 <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
-              </div>
-              <p className="text-sm text-muted-foreground">
-                {preview.row_count} rows, {preview.headers.length} columns
+              </Field>
+              <p className="pb-2 text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">{preview.row_count}</span> rows ·{' '}
+                <span className="font-medium text-foreground">{preview.headers.length}</span> columns
               </p>
             </div>
           </Card>
 
           <Card>
-            <h2 className="font-semibold">Map the columns</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Map at least one identifier (name or company) and at least one thing to scrape (website or a
-              LinkedIn URL).
-            </p>
+            <CardHeader
+              title="Match your columns"
+              description="We guessed from the headers. Check each one against the sample value on the right."
+            />
 
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              {fields.map((field) => {
-                const column = mapping[field] || UNMAPPED
-                const conflict = column ? takenBy(column, field) : null
-                return (
-                  <div key={field}>
-                    <label className="label" htmlFor={`map-${field}`}>
-                      {field}
-                    </label>
-                    <Select
-                      id={`map-${field}`}
-                      value={column}
-                      onChange={(e) =>
-                        setMapping((prev) => {
-                          const next = { ...prev }
-                          if (e.target.value) next[field] = e.target.value
-                          else delete next[field]
-                          return next
-                        })
-                      }
-                    >
-                      <option value={UNMAPPED}>— not mapped —</option>
-                      {preview.headers.map((header) => (
-                        <option key={header} value={header}>
-                          {header}
-                        </option>
-                      ))}
-                    </Select>
-                    {conflict ? (
-                      <p className="hint text-warning">Also mapped to &quot;{conflict}&quot;.</p>
-                    ) : (
-                      FIELD_HELP[field] && <p className="hint">{FIELD_HELP[field]}</p>
-                    )}
-                  </div>
-                )
-              })}
+            <div className="space-y-8">
+              {[...GROUPS, ...(extraFields.length ? [{ title: 'Other', description: '', fields: extraFields }] : [])].map(
+                (group) => {
+                  const groupFields = group.fields.filter((f) => fields.includes(f))
+                  if (!groupFields.length) return null
+                  const required =
+                    group.fields === GROUPS[0].fields
+                      ? IDENTIFIER_FIELDS
+                      : group.fields === GROUPS[1].fields
+                        ? TARGET_FIELDS
+                        : null
+                  const satisfied = required ? required.some((f) => mapping[f]) : true
+                  return (
+                    <section key={group.title}>
+                      <div className="mb-3 flex items-baseline gap-3 border-b border-border pb-2">
+                        <h3 className="text-sm font-semibold">{group.title}</h3>
+                        {group.description && (
+                          <p className={cn('text-xs', satisfied ? 'text-muted-foreground' : 'text-warning')}>
+                            {group.description}
+                          </p>
+                        )}
+                      </div>
+                      <div className="grid gap-x-6 gap-y-4 md:grid-cols-2">
+                        {groupFields.map((field) => {
+                          const column = mapping[field] || UNMAPPED
+                          const conflict = column ? takenBy(column, field) : null
+                          const example = column && sample ? sample[column] : null
+                          const meta = FIELD_META[field]
+                          return (
+                            <Field
+                              key={field}
+                              id={`map-${field}`}
+                              label={meta?.label ?? field}
+                              error={conflict ? `Also mapped to ${FIELD_META[conflict]?.label ?? conflict}.` : undefined}
+                              hint={
+                                example ? (
+                                  <>
+                                    e.g. <span className="font-medium text-foreground">{example}</span>
+                                  </>
+                                ) : (
+                                  meta?.help
+                                )
+                              }
+                            >
+                              <Select
+                                id={`map-${field}`}
+                                value={column}
+                                className={cn(!column && 'text-muted-foreground')}
+                                onChange={(e) =>
+                                  setMapping((prev) => {
+                                    const next = { ...prev }
+                                    if (e.target.value) next[field] = e.target.value
+                                    else delete next[field]
+                                    return next
+                                  })
+                                }
+                              >
+                                <option value={UNMAPPED}>Not in this sheet</option>
+                                {preview.headers.map((header) => (
+                                  <option key={header} value={header}>
+                                    {header}
+                                  </option>
+                                ))}
+                              </Select>
+                            </Field>
+                          )
+                        })}
+                      </div>
+                    </section>
+                  )
+                },
+              )}
             </div>
           </Card>
 
           <Card>
-            <h2 className="mb-3 font-semibold">First rows</h2>
-            <div className="table-wrap">
+            <CardHeader
+              title="First rows"
+              description="Mapped columns are highlighted."
+            />
+            <div className="table-wrap shadow-none">
               <table className="data">
                 <thead>
                   <tr>
                     {preview.headers.map((header) => (
-                      <th key={header}>{header}</th>
+                      <th key={header} className={cn(mappedColumns.has(header) && 'bg-primary/10 text-primary')}>
+                        {header}
+                      </th>
                     ))}
                   </tr>
                 </thead>
@@ -247,7 +410,14 @@ export default function NewUploadPage() {
                   {preview.sample_rows.map((row, index) => (
                     <tr key={index}>
                       {preview.headers.map((header) => (
-                        <td key={header} className="max-w-56 truncate text-muted-foreground">
+                        <td
+                          key={header}
+                          className={cn(
+                            'max-w-56 truncate',
+                            mappedColumns.has(header) ? 'text-foreground' : 'text-muted-foreground',
+                          )}
+                          title={row[header]}
+                        >
                           {row[header]}
                         </td>
                       ))}
@@ -258,12 +428,20 @@ export default function NewUploadPage() {
             </div>
           </Card>
 
-          <div className="flex gap-3">
-            <Button onClick={commit} disabled={busy}>
-              {busy ? 'Saving...' : `Create upload with ${preview.row_count} rows`}
+          <div className="sticky bottom-4 z-10 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-elevated/95 px-4 py-3 shadow-pop backdrop-blur">
+            <Button variant="ghost" onClick={() => setPreview(null)} disabled={busy}>
+              <ArrowLeft className="h-4 w-4" /> Back
             </Button>
-            <Button variant="secondary" onClick={() => setPreview(null)} disabled={busy}>
-              Back
+            <div className="min-w-0 flex-1 text-sm">
+              {problems.length ? (
+                <span className="text-warning">{problems[0]}</span>
+              ) : (
+                <span className="text-muted-foreground">Looks good. Next you will choose what to research.</span>
+              )}
+            </div>
+            <Button onClick={commit} loading={busy} disabled={problems.length > 0}>
+              Import {preview.row_count} rows
+              {!busy && <ArrowRight className="h-4 w-4" />}
             </Button>
           </div>
         </div>

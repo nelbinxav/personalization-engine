@@ -8,12 +8,17 @@ services:
       MONGODB_URL: mongodb://mongo:27017
       REDIS_URL: redis://redis:6379
       ANTHROPIC_CONFIG_DIR: /var/lib/anthropic
+      CLAUDE_CONFIG_DIR: /var/lib/claude-code
+    # Loopback only by default. Docker-published ports skip the host firewall,
+    # so 0.0.0.0 on a server would expose the API to anything that can reach
+    # the machine. Tailscale (or a tunnel) proxies to this from the host.
     ports:
-      - "8000:8000"
+      - "${BIND_ADDRESS:-127.0.0.1}:8000:8000"
     depends_on: [mongo, redis]
     volumes:
       - ./backend/app:/app/app
       - anthropic_profile:/var/lib/anthropic
+      - claude_code_profile:/var/lib/claude-code
 
   worker:
     build: ./backend
@@ -24,23 +29,31 @@ services:
       MONGODB_URL: mongodb://mongo:27017
       REDIS_URL: redis://redis:6379
       ANTHROPIC_CONFIG_DIR: /var/lib/anthropic
+      CLAUDE_CONFIG_DIR: /var/lib/claude-code
     depends_on: [mongo, redis]
     volumes:
       - ./backend/app:/app/app
       # Same volume as the api: the OAuth profile written by the connect flow
       # has to be readable by the process that actually spends tokens.
       - anthropic_profile:/var/lib/anthropic
+      # Claude Code's own sign-in (subscription mode). Written only by the
+      # unmodified `claude` binary; the app never reads the credential in it.
+      - claude_code_profile:/var/lib/claude-code
     command: ["arq", "app.worker.main.WorkerSettings"]
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # A BUILD arg, not a runtime env var: Next.js inlines NEXT_PUBLIC_* into
+        # the client bundle at build time, so setting it at runtime did nothing
+        # and every build called http://localhost:8000. It is the URL as the
+        # BROWSER sees it; change it -> rebuild the frontend.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     container_name: pe-frontend
     restart: unless-stopped
-    environment:
-      # Browser-side calls, so this is the URL as the browser sees it.
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     ports:
-      - "3000:3000"
+      - "${BIND_ADDRESS:-127.0.0.1}:3000:3000"
     depends_on: [api]
 
   mongo:
@@ -62,3 +75,4 @@ volumes:
   mongo_data:
   redis_data:
   anthropic_profile:
+  claude_code_profile:

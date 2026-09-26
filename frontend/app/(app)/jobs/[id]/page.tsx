@@ -1,5 +1,6 @@
 'use client'
 
+import { ArrowLeft, ArrowRight, ChevronDown, ChevronLeft, ChevronRight, Download, RotateCcw } from 'lucide-react'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { useCallback, useEffect, useState } from 'react'
@@ -8,109 +9,243 @@ import {
   Alert,
   Badge,
   Button,
-  Card,
+  CopyButton,
   Empty,
+  LinkButton,
   PageHeader,
   Progress,
-  Select,
+  Segmented,
   Spinner,
-  statusTone,
+  Stat,
+  StatusBadge,
+  buttonClasses,
+  cn,
+  toast,
 } from '@/components/ui'
-import { api } from '@/lib/api'
+import { api, exportUrl } from '@/lib/api'
 import type { Job, ProspectRow } from '@/lib/types'
+import { PHASE_LABEL, duration, isActive, money, timeAgo } from '@/lib/workflow'
+
+// The rows endpoint pages at 50 by default; without paging here, rows 51+ of
+// a large sheet were simply invisible.
+const PAGE_SIZE = 50
+
+function prospectName(row: ProspectRow) {
+  return (
+    row.identity.full_name ||
+    [row.identity.first_name, row.identity.last_name].filter(Boolean).join(' ') ||
+    row.identity.email ||
+    row.identity.company ||
+    `Row ${row.row_index + 1}`
+  )
+}
 
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>()
   const [job, setJob] = useState<Job | null>(null)
   const [rows, setRows] = useState<ProspectRow[] | null>(null)
   const [filter, setFilter] = useState('')
-  const [expanded, setExpanded] = useState<string | null>(null)
+  const [page, setPage] = useState(0)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [sourceLabels, setSourceLabels] = useState<Record<string, string>>({})
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
+      const query = new URLSearchParams({ skip: String(page * PAGE_SIZE), limit: String(PAGE_SIZE) })
+      if (filter) query.set('status_filter', filter)
       const [jobData, rowData] = await Promise.all([
         api.get<Job>(`/jobs/${id}`),
-        api.get<ProspectRow[]>(`/jobs/${id}/rows${filter ? `?status_filter=${filter}` : ''}`),
+        api.get<ProspectRow[]>(`/jobs/${id}/rows?${query}`),
       ])
       setJob(jobData)
       setRows(rowData)
     } catch (err: any) {
       setError(err.message)
     }
-  }, [id, filter])
+  }, [id, filter, page])
 
   useEffect(() => {
     refresh()
   }, [refresh])
 
   useEffect(() => {
-    if (job?.status !== 'queued' && job?.status !== 'running') return
+    api
+      .get<{ sources: { key: string; label: string }[] }>('/jobs/sources')
+      .then((r) => setSourceLabels(Object.fromEntries(r.sources.map((s) => [s.key, s.label]))))
+      .catch(() => null)
+  }, [])
+
+  const active = job ? isActive(job) : false
+  useEffect(() => {
+    if (!active) return
     const timer = setInterval(refresh, 3000)
     return () => clearInterval(timer)
-  }, [job?.status, refresh])
+  }, [active, refresh])
 
   async function retry(row: ProspectRow) {
-    await api.post(`/jobs/${id}/rows/${row.id}/retry`).catch((err) => setError(err.message))
+    try {
+      await api.post(`/jobs/${id}/rows/${row.id}/retry`)
+      toast.success(`Row ${row.row_index + 1} queued again.`)
+    } catch (err: any) {
+      toast.error(err.message)
+    }
     refresh()
   }
 
-  if (!job && !error) return <Spinner />
+  async function act(action: 'cancel' | 'resume') {
+    try {
+      await api.post(`/jobs/${id}/${action}`)
+      toast.success(action === 'cancel' ? 'Cancelled. Finished rows keep their results.' : 'Resumed.')
+    } catch (err: any) {
+      toast.error(err.message)
+    }
+    refresh()
+  }
 
-  const isScrape = job?.type === 'scrape'
+  function toggle(rowId: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(rowId)) next.delete(rowId)
+      else next.add(rowId)
+      return next
+    })
+  }
+
+  if (error && !job) return <Alert title="Could not load this job">{error}</Alert>
+  if (!job) return <Spinner />
+
+  const isScrape = job.type === 'scrape'
   const statusOf = (row: ProspectRow) => (isScrape ? row.scrape_status : row.personalize_status)
   const errorOf = (row: ProspectRow) => (isScrape ? row.scrape_error : row.personalize_error)
+  const processed = job.counts.done + job.counts.failed + job.counts.skipped
+  const finished = job.status === 'done'
 
   return (
     <>
       <PageHeader
-        title={`${job?.type ?? 'Job'} · ${job?.upload_name ?? ''}`}
-        description={job ? `Job ${job.id}` : undefined}
-        action={
-          <Link href="/jobs">
-            <Button variant="secondary">All jobs</Button>
+        eyebrow={
+          <Link href={`/uploads/${job.upload_id}`} className="inline-flex items-center gap-1.5 hover:text-foreground">
+            <ArrowLeft className="h-3.5 w-3.5" /> {job.upload_name ?? 'Upload'}
           </Link>
+        }
+        title={
+          <span className="flex flex-wrap items-center gap-3">
+            {PHASE_LABEL[job.type]}
+            {job.options.channel && !isScrape && (
+              <span className="text-lg font-normal capitalize text-muted-foreground">{job.options.channel}</span>
+            )}
+            <StatusBadge status={job.status} />
+          </span>
+        }
+        description={`Started ${timeAgo(job.created_at)}${job.options.limit ? ` · first ${job.options.limit} rows` : ''}${job.options.force ? ' · redo' : ''}`}
+        action={
+          <>
+            {active && (
+              <Button variant="outline" onClick={() => act('cancel')}>
+                Cancel
+              </Button>
+            )}
+            {(job.status === 'blocked_auth' || job.status === 'cancelled') && (
+              <Button icon={RotateCcw} onClick={() => act('resume')}>
+                Resume
+              </Button>
+            )}
+          </>
         }
       />
 
-      {error && (
-        <div className="mb-4">
-          <Alert>{error}</Alert>
-        </div>
+      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        <Stat
+          label="Progress"
+          value={`${processed}/${job.counts.total}`}
+          hint={<Progress done={job.counts.done + job.counts.skipped} failed={job.counts.failed} total={job.counts.total} showLabel={false} className="mt-1.5" />}
+        />
+        <Stat label="Done" value={job.counts.done} tone={job.counts.done ? 'success' : undefined} />
+        <Stat label="Failed" value={job.counts.failed} tone={job.counts.failed ? 'danger' : undefined} />
+        <Stat label="Skipped" value={job.counts.skipped} hint={isScrape ? 'Nothing to fetch' : undefined} />
+        <Stat
+          label={isScrape ? 'Time' : 'Cost'}
+          value={
+            isScrape
+              ? (job.finished_at || active ? duration(job.started_at, job.finished_at) : null) ?? '—'
+              : money(job.cost_usd, 4)
+          }
+          hint={!isScrape && job.finished_at ? `in ${duration(job.started_at, job.finished_at)}` : undefined}
+        />
+      </div>
+
+      {job.error && (
+        <Alert
+          tone="warning"
+          className="mb-6"
+          title={job.status === 'blocked_auth' ? 'Paused' : 'Job error'}
+          action={
+            job.status === 'blocked_auth' && (
+              <LinkButton href="/settings#claude" size="sm" variant="outline">
+                Claude settings
+              </LinkButton>
+            )
+          }
+        >
+          {job.error}
+          {job.status === 'blocked_auth' && ' Finished rows kept their results, and Resume picks up only the rows that never ran.'}
+        </Alert>
       )}
 
-      {job && (
-        <Card className="mb-6">
-          <div className="flex flex-wrap items-center gap-6">
-            <Badge tone={statusTone(job.status)}>{job.status.replace('_', ' ')}</Badge>
-            <Progress
-              value={job.counts.done + job.counts.failed + job.counts.skipped}
-              total={job.counts.total}
-            />
-            <span className="text-sm text-muted-foreground">
-              {job.counts.done} done · {job.counts.failed} failed · {job.counts.skipped} skipped
-            </span>
-            {job.cost_usd > 0 && (
-              <span className="text-sm text-muted-foreground">${job.cost_usd.toFixed(4)}</span>
-            )}
-          </div>
-          {job.error && (
-            <div className="mt-4">
-              <Alert tone="warning">{job.error}</Alert>
-            </div>
-          )}
-        </Card>
+      {finished && (
+        <Alert
+          tone="success"
+          className="mb-6"
+          title={isScrape ? 'Research finished' : 'Messages written'}
+          action={
+            isScrape ? (
+              <LinkButton href={`/uploads/${job.upload_id}?phase=personalize`} size="sm">
+                Personalize <ArrowRight className="h-3.5 w-3.5" />
+              </LinkButton>
+            ) : (
+              <a href={exportUrl(job.upload_id, 'personalized')} className={buttonClasses('primary', 'sm')}>
+                <Download className="h-3.5 w-3.5" /> Download CSV
+              </a>
+            )
+          }
+        >
+          {isScrape
+            ? 'Spot-check a few rows below, then write messages from this research.'
+            : 'Read a few below. Rows marked “Needs review” had too little research to personalize honestly.'}
+        </Alert>
       )}
 
-      <div className="mb-4 flex items-center gap-3">
-        <label className="text-sm text-muted-foreground">Filter</label>
-        <Select className="w-52" value={filter} onChange={(e) => setFilter(e.target.value)}>
-          <option value="">All rows</option>
-          <option value="done">Done</option>
-          <option value="failed">Failed</option>
-          <option value="skipped">Skipped</option>
-          {!isScrape && <option value="thin_context">Needs review (thin context)</option>}
-        </Select>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <Segmented
+          label="Filter rows"
+          size="sm"
+          value={filter}
+          onChange={(value) => {
+            setFilter(value)
+            setPage(0)
+          }}
+          options={[
+            { value: '', label: 'All' },
+            { value: 'done', label: 'Done' },
+            ...(!isScrape ? [{ value: 'thin_context', label: 'Needs review' }] : []),
+            { value: 'failed', label: 'Failed' },
+            { value: 'skipped', label: 'Skipped' },
+            { value: 'pending', label: 'Not run' },
+          ]}
+        />
+        {!isScrape && rows && rows.some((r) => r.body) && (
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={ChevronDown}
+            onClick={() =>
+              setExpanded((prev) => (prev.size ? new Set() : new Set(rows.filter((r) => r.body).map((r) => r.id))))
+            }
+          >
+            {expanded.size ? 'Collapse all' : 'Expand all'}
+          </Button>
+        )}
       </div>
 
       {!rows && <Spinner />}
@@ -121,9 +256,9 @@ export default function JobDetailPage() {
           <table className="data">
             <thead>
               <tr>
-                <th>#</th>
+                <th className="w-12">#</th>
                 <th>Prospect</th>
-                <th>{isScrape ? 'Sources' : 'Message'}</th>
+                <th>{isScrape ? 'What was found' : 'Message'}</th>
                 <th>Status</th>
                 <th />
               </tr>
@@ -132,56 +267,60 @@ export default function JobDetailPage() {
               {rows.map((row) => {
                 const status = statusOf(row)
                 const rowError = errorOf(row)
-                const open = expanded === row.id
+                const open = expanded.has(row.id)
+                const busy = status === 'queued' || status === 'running'
                 return (
                   <tr key={row.id}>
                     <td className="tabular-nums text-muted-foreground">{row.row_index + 1}</td>
-                    <td>
-                      <div className="font-medium">
-                        {row.identity.full_name ||
-                          [row.identity.first_name, row.identity.last_name].filter(Boolean).join(' ') ||
-                          row.identity.email ||
-                          '—'}
+                    <td className="min-w-40">
+                      <div className="font-medium">{prospectName(row)}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {[row.identity.title, row.identity.company].filter(Boolean).join(' · ')}
                       </div>
-                      <div className="text-xs text-muted-foreground">{row.identity.company}</div>
                     </td>
 
-                    <td className="max-w-lg">
+                    <td className="w-full max-w-xl">
                       {isScrape ? (
-                        <div className="flex flex-wrap gap-1">
+                        <div className="flex flex-wrap gap-1.5">
                           {Object.keys(row.sources).length === 0 && (
-                            <span className="text-xs text-muted-foreground">nothing fetched</span>
+                            <span className="text-xs text-muted-foreground">Nothing fetched yet</span>
                           )}
                           {Object.entries(row.sources).map(([key, ok]) => (
-                            <Badge key={key} tone={ok ? 'success' : 'danger'}>
-                              {key}
+                            <Badge key={key} tone={ok ? 'success' : 'danger'} dot title={ok ? 'Fetched' : 'Failed'}>
+                              {sourceLabels[key] ?? key}
                             </Badge>
                           ))}
                         </div>
                       ) : row.body ? (
                         <div>
-                          {row.subject && <div className="text-xs font-medium">{row.subject}</div>}
-                          <div className={open ? 'whitespace-pre-wrap text-sm' : 'truncate text-sm'}>
+                          {row.subject && <div className="mb-1 text-sm font-medium">{row.subject}</div>}
+                          <p className={cn('text-sm leading-relaxed text-foreground/90', open ? 'whitespace-pre-wrap' : 'line-clamp-2')}>
                             {row.body}
-                          </div>
+                          </p>
                           {open && row.angle && (
-                            <div className="mt-2 rounded border border-border bg-muted p-2 text-xs">
-                              <div>
-                                <span className="text-muted-foreground">Angle: </span>
+                            <div className="mt-3 space-y-1.5 rounded-lg border border-border bg-muted/50 p-3 text-xs">
+                              <p>
+                                <span className="font-medium text-muted-foreground">Angle </span>
                                 {row.angle}
-                              </div>
-                              <div className="mt-1">
-                                <span className="text-muted-foreground">Evidence: </span>
+                              </p>
+                              <p>
+                                <span className="font-medium text-muted-foreground">Evidence </span>
                                 {row.evidence}
-                              </div>
+                              </p>
                             </div>
                           )}
-                          <button
-                            onClick={() => setExpanded(open ? null : row.id)}
-                            className="mt-1 text-xs text-primary underline"
-                          >
-                            {open ? 'collapse' : 'expand'}
-                          </button>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                            <button onClick={() => toggle(row.id)} className="link text-xs">
+                              {open ? 'Show less' : 'Show full message & evidence'}
+                            </button>
+                            <span className="text-xs text-muted-foreground">· {row.body.length} chars</span>
+                            {open && (
+                              <CopyButton
+                                text={row.subject ? `${row.subject}\n\n${row.body}` : row.body}
+                                label="Copy message"
+                              />
+                            )}
+                          </div>
                         </div>
                       ) : (
                         <span className="text-xs text-muted-foreground">—</span>
@@ -189,15 +328,20 @@ export default function JobDetailPage() {
                     </td>
 
                     <td>
-                      <Badge tone={statusTone(status)}>{status.replace('_', ' ')}</Badge>
-                      {rowError && (
-                        <div className="mt-1 max-w-64 text-xs text-muted-foreground">{rowError}</div>
-                      )}
+                      <StatusBadge status={status} />
+                      {rowError && <div className="mt-1.5 max-w-64 text-xs text-muted-foreground">{rowError}</div>}
                     </td>
 
                     <td>
-                      <Button size="sm" variant="ghost" onClick={() => retry(row)}>
-                        {isScrape ? 'Re-scrape' : 'Regenerate'}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        icon={RotateCcw}
+                        onClick={() => retry(row)}
+                        disabled={busy}
+                        title={isScrape ? 'Research this row again' : 'Write this message again'}
+                      >
+                        {status === 'failed' ? 'Retry' : 'Redo'}
                       </Button>
                     </td>
                   </tr>
@@ -205,6 +349,22 @@ export default function JobDetailPage() {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {rows && (page > 0 || rows.length === PAGE_SIZE) && (
+        <div className="mt-4 flex items-center justify-between text-sm text-muted-foreground">
+          <span>
+            Rows {page * PAGE_SIZE + 1}–{page * PAGE_SIZE + rows.length}
+          </span>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" icon={ChevronLeft} disabled={page === 0} onClick={() => setPage(page - 1)}>
+              Previous
+            </Button>
+            <Button size="sm" variant="outline" disabled={rows.length < PAGE_SIZE} onClick={() => setPage(page + 1)}>
+              Next <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       )}
     </>

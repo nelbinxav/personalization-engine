@@ -1,54 +1,59 @@
 'use client'
 
+import { ArrowRight, FileSpreadsheet, Plus } from 'lucide-react'
 import Link from 'next/link'
 import { useEffect, useState } from 'react'
 
-import { Alert, Badge, Button, Empty, PageHeader, Spinner } from '@/components/ui'
-import { api, exportUrl } from '@/lib/api'
+import { Alert, Badge, Empty, LinkButton, PageHeader, Progress, Skeleton } from '@/components/ui'
+import { api } from '@/lib/api'
 import type { Upload } from '@/lib/types'
+import { NEXT_ACTION_LABEL, nextAction, timeAgo } from '@/lib/workflow'
 
 export default function UploadsPage() {
   const [uploads, setUploads] = useState<Upload[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  async function load() {
-    try {
-      setUploads(await api.get<Upload[]>('/uploads'))
-    } catch (err: any) {
-      setError(err.message)
-    }
-  }
-
   useEffect(() => {
-    load()
+    api
+      .get<Upload[]>('/uploads')
+      .then(setUploads)
+      .catch((err) => setError(err.message))
   }, [])
-
-  async function remove(upload: Upload) {
-    if (!confirm(`Delete "${upload.name}" and all ${upload.row_count} of its rows? This cannot be undone.`)) {
-      return
-    }
-    await api.del(`/uploads/${upload.id}`)
-    load()
-  }
 
   return (
     <>
       <PageHeader
         title="Uploads"
-        description="A CSV or Google Sheet of prospects. Each upload keeps its original columns, so every export can be pasted straight back into wherever it came from."
+        description="Each upload is one list of prospects. It keeps your original columns, so every download pastes straight back to wherever it came from."
         action={
-          <Link href="/uploads/new">
-            <Button>New upload</Button>
-          </Link>
+          <LinkButton href="/uploads/new" icon={Plus}>
+            New upload
+          </LinkButton>
         }
       />
 
-      {error && <Alert>{error}</Alert>}
-      {!uploads && !error && <Spinner />}
+      {error && <Alert title="Could not load uploads">{error}</Alert>}
+
+      {!uploads && !error && (
+        <div className="space-y-2">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-16 w-full" />
+          ))}
+        </div>
+      )}
 
       {uploads?.length === 0 && (
-        <Empty>
-          No uploads yet. <Link href="/uploads/new" className="text-primary underline">Add one</Link> to get started.
+        <Empty
+          icon={FileSpreadsheet}
+          title="No uploads yet"
+          action={
+            <LinkButton href="/uploads/new" icon={Plus}>
+              Add your first list
+            </LinkButton>
+          }
+        >
+          Bring a CSV or a Google Sheet of prospects. You will confirm which column is which before
+          anything runs.
         </Empty>
       )}
 
@@ -58,55 +63,46 @@ export default function UploadsPage() {
             <thead>
               <tr>
                 <th>Name</th>
-                <th>Source</th>
                 <th>Rows</th>
                 <th>Researched</th>
-                <th>Personalized</th>
-                <th>Download</th>
-                <th />
+                <th>Messages</th>
+                <th className="text-right">Next step</th>
               </tr>
             </thead>
             <tbody>
-              {uploads.map((upload) => (
-                <tr key={upload.id}>
-                  <td className="font-medium">{upload.name}</td>
-                  <td>
-                    <Badge>{upload.source === 'gsheet' ? 'Google Sheet' : 'CSV'}</Badge>
-                  </td>
-                  <td className="tabular-nums">{upload.row_count}</td>
-                  <td className="tabular-nums text-muted-foreground">
-                    {upload.scraped}/{upload.row_count}
-                  </td>
-                  <td className="tabular-nums text-muted-foreground">
-                    {upload.personalized}/{upload.row_count}
-                  </td>
-                  <td>
-                    <div className="flex gap-2 text-xs">
-                      {(['research', 'personalized', 'combined'] as const).map((kind) => (
-                        <a
-                          key={kind}
-                          href={exportUrl(upload.id, kind)}
-                          className="text-primary underline underline-offset-2"
-                        >
-                          {kind}
-                        </a>
-                      ))}
-                    </div>
-                  </td>
-                  <td>
-                    <div className="flex justify-end gap-2">
-                      <Link href={`/jobs?upload=${upload.id}`}>
-                        <Button size="sm" variant="secondary">
-                          Run
-                        </Button>
+              {uploads.map((upload) => {
+                const next = nextAction(upload)
+                return (
+                  <tr key={upload.id}>
+                    <td>
+                      <Link href={`/uploads/${upload.id}`} className="font-medium hover:text-primary">
+                        {upload.name}
                       </Link>
-                      <Button size="sm" variant="ghost" onClick={() => remove(upload)}>
-                        Delete
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                      <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+                        <Badge>{upload.source === 'gsheet' ? 'Google Sheet' : 'CSV'}</Badge>
+                        {timeAgo(upload.created_at)}
+                      </div>
+                    </td>
+                    <td className="tabular-nums">{upload.row_count}</td>
+                    <td>
+                      <Progress done={upload.scraped} total={upload.row_count} />
+                    </td>
+                    <td>
+                      <Progress done={upload.personalized} total={upload.row_count} />
+                    </td>
+                    <td className="text-right">
+                      <LinkButton
+                        href={`/uploads/${upload.id}`}
+                        size="sm"
+                        variant={next === 'export' ? 'outline' : 'secondary'}
+                      >
+                        {NEXT_ACTION_LABEL[next]}
+                        <ArrowRight className="h-3.5 w-3.5" />
+                      </LinkButton>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>

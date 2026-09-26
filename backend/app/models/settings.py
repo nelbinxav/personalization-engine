@@ -10,6 +10,9 @@ SETTINGS_ID = "singleton"
 class CredentialMode(str, Enum):
     oauth = "oauth"
     api_key = "api_key"
+    # The operator's own Claude subscription, via the unmodified Claude Code
+    # binary. See app/ai/claude_code.py for why it has to be done this way.
+    claude_code = "claude_code"
 
 
 class AIConfig(BaseModel):

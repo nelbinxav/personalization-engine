@@ -22,13 +22,13 @@ from dataclasses import dataclass, field
 
 import anthropic
 
-from app.ai import pricing
+from app.ai import claude_code, pricing
 from app.ai.client import AuthUnavailable, get_client
 from app.ai.schemas import AnglesOut, DossierOut, DraftOut, strict_schema
 from app.models.common import Channel, Identity
 from app.models.prompt import Stage
 from app.models.prospect import Angle, Dossier, Draft, Fact, Personalization, SourceResult, Usage
-from app.models.settings import AppSettings
+from app.models.settings import AppSettings, CredentialMode
 from app.models.template import Constraints, Template
 
 logger = logging.getLogger(__name__)
@@ -176,7 +176,7 @@ def prospect_block(identity: Identity, **sections: str) -> str:
 
 
 async def call_stage(
-    client: anthropic.AsyncAnthropic,
+    client: anthropic.AsyncAnthropic | None,
     *,
     system_text: str,
     user_text: str,
@@ -186,6 +186,25 @@ async def call_stage(
     max_tokens: int,
     cacheable: bool,
 ) -> StageResult:
+    if client is None:
+        # claude_code mode: the subscription, through the unmodified CLI.
+        try:
+            parsed, usage = await claude_code.run_stage(
+                system_text=system_text,
+                user_text=user_text,
+                schema=strict_schema(schema_model),
+                model=model,
+                effort=effort,
+            )
+        except claude_code.ClaudeCodeError as exc:
+            raise ChainError(str(exc)) from exc
+        return StageResult(
+            parsed=parsed,
+            usage=usage,
+            cacheable=cacheable,
+            cache_hit=usage.cache_read_input_tokens > 0,
+        )
+
     system_block: dict = {"type": "text", "text": system_text}
     if cacheable:
         # 1h TTL: a job over a few hundred rows runs well past the 5-minute default.
@@ -281,13 +300,19 @@ async def run_chain(
     settings: AppSettings,
     channel: Channel,
 ) -> ChainOutput:
-    client = await get_client()
+    # None selects the claude_code path in call_stage.
+    subscription = settings.ai.mode is CredentialMode.claude_code
+    client = None if subscription else await get_client()
     model = settings.ai.model
     max_tokens = settings.ai.max_tokens
     enabled = set(settings.ai.enabled_stages)
 
     usage_total = Usage()
     warnings: list[str] = []
+
+    def cost_of(usage: Usage) -> float:
+        # Subscription usage is covered by the plan, so nothing is billed per row.
+        return 0.0 if subscription else pricing.cost_usd(model, usage)
 
     def effort_for(stage: Stage) -> str:
         return settings.ai.effort.get(str(int(stage)), "high")
@@ -378,7 +403,7 @@ async def run_chain(
                 angles=angles,
                 model=model,
                 usage=usage_total,
-                cost_usd=pricing.cost_usd(model, usage_total),
+                cost_usd=cost_of(usage_total),
                 template_version=template.version,
             ),
             thin_context=True,
@@ -460,7 +485,7 @@ async def run_chain(
             draft=draft,
             model=model,
             usage=usage_total,
-            cost_usd=pricing.cost_usd(model, usage_total),
+            cost_usd=cost_of(usage_total),
             template_version=template.version,
             constraint_warning=constraint_warning,
         ),

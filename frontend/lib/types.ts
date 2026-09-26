@@ -126,12 +126,13 @@ export interface Template {
 }
 
 export interface AiStatus {
-  mode: 'oauth' | 'api_key'
+  mode: 'oauth' | 'api_key' | 'claude_code'
   connected: boolean
   detail: string
   organization: string | null
   workspace: string | null
   ant_installed: boolean
+  claude_code_installed: boolean
   api_key_in_env: boolean
   warning: string | null
   model: string
@@ -139,7 +140,7 @@ export interface AiStatus {
 
 export interface AppSettings {
   ai: {
-    mode: 'oauth' | 'api_key'
+    mode: 'oauth' | 'api_key' | 'claude_code'
     model: string
     effort: Record<string, string>
     enabled_stages: number[]

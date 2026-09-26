@@ -1,6 +1,6 @@
 """Claude credential resolution and the operator OAuth connect flow.
 
-Two modes, chosen explicitly in Settings -- never inferred:
+Three modes, chosen explicitly in Settings -- never inferred:
 
   oauth    The operator runs a one-time device flow. `ant auth login` stores a
            profile under ANTHROPIC_CONFIG_DIR (a shared docker volume), and the
@@ -8,6 +8,9 @@ Two modes, chosen explicitly in Settings -- never inferred:
            short-lived token itself.
 
   api_key  A plain ANTHROPIC_API_KEY.
+
+  claude_code  The operator's Claude subscription, through the unmodified
+           Claude Code binary. No SDK client at all; see app/ai/claude_code.py.
 
 THE TRAP THIS MODULE EXISTS TO PREVENT: a set ANTHROPIC_API_KEY silently
 outranks the OAuth profile in the SDK's credential chain -- even an empty
@@ -38,7 +41,7 @@ from app.models.settings import CredentialMode
 logger = logging.getLogger(__name__)
 
 # `ant auth login --no-browser` prints a URL then blocks on stdin for the code.
-_URL_PATTERN = re.compile(r"https://\S*(?:claude\.ai|anthropic\.com)\S*")
+_URL_PATTERN = re.compile(r"https://\S*(?:claude\.ai|claude\.com|anthropic\.com)\S*")
 _FLOW_TIMEOUT = timedelta(minutes=15)
 
 
@@ -79,6 +82,12 @@ async def assert_credentials() -> None:
             raise AuthUnavailable(
                 f"Claude is not connected: {status.detail}. Connect it in Settings."
             )
+        return
+
+    if settings.ai.mode is CredentialMode.claude_code:
+        status = await auth_status()
+        if not status.connected:
+            raise AuthUnavailable(f"Claude Code is not signed in: {status.detail}")
         return
 
     if not await resolve_api_key():
@@ -153,6 +162,18 @@ async def _run_ant(*args: str, timeout: float = 30) -> tuple[int, str]:
 
 async def auth_status() -> AuthStatus:
     settings = await load_settings()
+
+    if settings.ai.mode is CredentialMode.claude_code:
+        from app.ai import claude_code  # local: claude_code imports this module
+
+        code_status = await claude_code.status()
+        return AuthStatus(
+            connected=code_status.connected,
+            mode="claude_code",
+            detail=code_status.detail,
+            organization=code_status.account,
+            workspace=code_status.plan,
+        )
 
     if settings.ai.mode is CredentialMode.api_key:
         has_key = bool(await resolve_api_key())

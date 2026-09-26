@@ -2,25 +2,65 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Dark-first, matching the gc-website design language: near-black surfaces,
-   a single accent, generous borders. */
+/* Dark-first, cool-neutral surfaces with the brand orange as the single
+   accent. Status colours are deliberately far apart in hue: info (blue) is
+   "in progress", warning (amber) is "needs a look" -- the old palette had
+   both near orange, so a running job and a parked one read the same.
+
+   Every colour is an HSL triple so Tailwind's /opacity modifiers work. */
 @layer base {
   :root {
-    --background: 0 0% 4%;
-    --foreground: 0 0% 98%;
-    --card: 0 0% 7%;
-    --border: 0 0% 16%;
-    --muted: 0 0% 11%;
-    --muted-foreground: 0 0% 63%;
-    --primary: 25 95% 53%;
-    --primary-foreground: 0 0% 8%;
-    --success: 142 70% 45%;
-    --warning: 38 92% 50%;
-    --danger: 0 72% 55%;
+    --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    --background: 220 20% 97.5%;
+    --foreground: 224 25% 11%;
+    --card: 0 0% 100%;
+    --elevated: 0 0% 100%;
+    --muted: 220 16% 95%;
+    --subtle: 220 14% 91.5%;
+    --muted-foreground: 220 9% 40%;
+    --border: 220 13% 88%;
+    --border-strong: 220 10% 78%;
+    --primary: 21 90% 50%;
+    --primary-foreground: 20 60% 9%;
+    --ring: 21 90% 50%;
+    --info: 214 84% 46%;
+    --success: 152 62% 33%;
+    --warning: 32 92% 40%;
+    --danger: 0 72% 48%;
+    --shadow: 222 30% 20%;
+    color-scheme: light;
+  }
+
+  .dark {
+    --background: 225 14% 5.5%;
+    --foreground: 220 14% 95%;
+    --card: 225 12% 8.5%;
+    --elevated: 225 11% 11%;
+    --muted: 225 10% 12.5%;
+    --subtle: 225 9% 16%;
+    --muted-foreground: 222 8% 62%;
+    --border: 225 9% 17%;
+    --border-strong: 225 8% 26%;
+    --primary: 21 92% 57%;
+    --primary-foreground: 20 60% 8%;
+    --ring: 21 92% 57%;
+    --info: 213 94% 67%;
+    --success: 151 55% 52%;
+    --warning: 40 96% 60%;
+    --danger: 358 82% 67%;
+    --shadow: 225 40% 2%;
+    color-scheme: dark;
   }
 
   * {
     border-color: hsl(var(--border));
+  }
+
+  html {
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv11', 'ss01';
   }
 
   body {
@@ -28,11 +68,26 @@
     color: hsl(var(--foreground));
     -webkit-font-smoothing: antialiased;
   }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.3);
+  }
+
+  /* Native checkboxes/radios pick up the accent instead of browser blue. */
+  input[type='checkbox'],
+  input[type='radio'] {
+    accent-color: hsl(var(--primary));
+  }
+
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
 }
 
 @layer components {
   .card {
-    @apply rounded-lg border border-border bg-card p-5;
+    @apply rounded-xl border border-border bg-card p-5 shadow-card;
   }
 
   .label {
@@ -44,12 +99,22 @@
   }
 
   .input {
-    @apply w-full rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground
-           placeholder:text-muted-foreground focus:border-primary focus:outline-none;
+    @apply w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground
+           shadow-sm transition-colors placeholder:text-muted-foreground/70
+           hover:border-border-strong focus:border-primary focus:outline-none focus:ring-2
+           focus:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .link {
+    @apply font-medium text-primary underline-offset-4 hover:underline;
+  }
+
+  .kbd {
+    @apply rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground;
   }
 
   .table-wrap {
-    @apply overflow-x-auto rounded-lg border border-border;
+    @apply overflow-x-auto rounded-xl border border-border bg-card shadow-card;
   }
 
   table.data {
@@ -57,12 +122,16 @@
   }
 
   table.data th {
-    @apply whitespace-nowrap border-b border-border bg-muted px-3 py-2 text-left
-           text-xs font-semibold uppercase tracking-wide text-muted-foreground;
+    @apply whitespace-nowrap border-b border-border bg-muted/60 px-4 py-2.5 text-left
+           text-[11px] font-semibold uppercase tracking-wider text-muted-foreground;
   }
 
   table.data td {
-    @apply border-b border-border px-3 py-2 align-top;
+    @apply border-b border-border px-4 py-3 align-top;
+  }
+
+  table.data tbody tr {
+    @apply transition-colors hover:bg-muted/40;
   }
 
   table.data tr:last-child td {
