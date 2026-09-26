@@ -14,3 +14,4 @@ dist/
 
 # deploy/backup.sh output: database dumps and a copy of .env
 backups/
+*.tsbuildinfo
