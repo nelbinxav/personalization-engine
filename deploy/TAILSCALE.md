@@ -5,9 +5,9 @@ devices signed in to your Tailscale network. It has no public address, the
 server has no open ports, and Tailscale provides HTTPS.
 
 ```
-teammate's laptop ──Tailscale──▶ https://engine.<tailnet>.ts.net        ─▶ 127.0.0.1:3000 (frontend)
-                                 https://engine.<tailnet>.ts.net:8443   ─▶ 127.0.0.1:8000 (api)
-                                 (Mongo and Redis are never published)
+teammate's laptop ──Tailscale──▶ https://engine.<tailnet>.ts.net ─▶ 127.0.0.1:3000 (frontend)
+                                        /api/v1/* forwarded by the frontend ─▶ api container
+                                 (the api, Mongo and Redis are never reachable directly)
 ```
 
 The steps assume an Oracle Cloud "Always Free" ARM VM running Ubuntu. Any
@@ -77,9 +77,8 @@ In `.env`:
 | Setting | Value |
 |---|---|
 | `APP_SECRET_KEY` | **The same value as your current `.env`** if you are moving existing data (step 7). Otherwise a new one: `python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())"` |
-| `ALLOWED_ORIGINS` | `["https://engine.<tailnet>.ts.net"]` |
 | `COOKIE_SECURE` | `true` |
-| `NEXT_PUBLIC_API_URL` | `https://engine.<tailnet>.ts.net:8443` |
+| `NEXT_PUBLIC_API_URL` | `/` (the default) |
 | `BIND_ADDRESS` | `127.0.0.1` |
 
 Leave `ANTHROPIC_API_KEY` unset (see `CLAUDE.md`). Provider keys can be
@@ -90,8 +89,7 @@ entered later in Settings.
 ```bash
 docker compose up -d --build        # first build takes a few minutes
 
-sudo tailscale serve --bg --https=443  http://127.0.0.1:3000
-sudo tailscale serve --bg --https=8443 http://127.0.0.1:8000
+sudo tailscale serve --bg --https=443 http://127.0.0.1:3000
 tailscale serve status
 ```
 
@@ -179,17 +177,14 @@ nothing happening. Cancel them and start again: rows already done are skipped.
 
 ## Switching to Cloudflare later
 
-Nothing in the app is tied to Tailscale. To move to Cloudflare Tunnel + Access:
-point the tunnel at `127.0.0.1:3000` and `127.0.0.1:8000`, change the three
-URLs in `.env` (`ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_URL`, plus
-`COOKIE_SECURE=true`), and run `docker compose up -d --build`. Then remove
-the `tailscale serve` entries with `sudo tailscale serve reset`.
+Nothing in the app is tied to Tailscale. To move to Cloudflare Tunnel + Access,
+point the tunnel at `127.0.0.1:3000`; no `.env` or code change is needed.
+Then remove the `tailscale serve` entry with `sudo tailscale serve reset`.
 
 ## Troubleshooting
 
 | Symptom | Cause |
 |---|---|
-| Login page loads, but signing in fails with a network error | `NEXT_PUBLIC_API_URL` is wrong, or the frontend was not rebuilt after changing it |
-| Browser console shows a CORS error | `ALLOWED_ORIGINS` does not exactly match the address in the browser (no trailing slash) |
+| Login page loads, but signing in fails with a network error | `NEXT_PUBLIC_API_URL` is not `/`, or the frontend was not rebuilt after changing it |
 | Signed in, but every page bounces back to login | `COOKIE_SECURE=true` over plain http. Use the `https://` address |
 | `tailscale serve` complains about certificates | HTTPS Certificates are not enabled in the admin console (step 2) |

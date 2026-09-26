@@ -6,8 +6,11 @@
  * `credentials: 'include'` -- the API and the frontend are different origins in
  * development (:8000 vs :3000).
  */
+// Unset -> the API on localhost:8000 (local dev). "/" -> same origin: calls go
+// to /api/v1 on the Next server, which forwards them (see next.config.js).
+const configured = process.env.NEXT_PUBLIC_API_URL
 export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') || 'http://localhost:8000'
+  configured === undefined || configured === '' ? 'http://localhost:8000' : configured.replace(/\/$/, '')
 
 export class ApiError extends Error {
   status: number

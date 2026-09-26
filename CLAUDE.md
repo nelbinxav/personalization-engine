@@ -130,8 +130,17 @@ with light and dark sets; `info` (blue) means in progress and `warning`
 
 ### Deployment
 
+- The app is **one address**: with `NEXT_PUBLIC_API_URL=/` (the default) the
+  browser calls `/api/v1/*` on the Next server, which forwards it to the api
+  container (`rewrites` in `next.config.js`, target `API_INTERNAL_URL`). One
+  tunnel covers everything and there is no CORS. The forward's timeout is
+  raised to 5 minutes because prompt previews outlast the 30s default.
 - `NEXT_PUBLIC_API_URL` is a **build arg**: Next.js inlines it into the bundle.
   Changing it means rebuilding the frontend; setting it at runtime does nothing.
+- Login is throttled per account (10 failures per 15 minutes, in Redis), not
+  per IP: behind a tunnel every request comes from the same address.
+- `deploy/share.sh` shares the local stack through a temporary Cloudflare
+  Quick Tunnel for testing.
 - The api and frontend ports publish on `${BIND_ADDRESS:-127.0.0.1}`. Docker
   ports bypass the host firewall, so never default them to `0.0.0.0`; a
   Tailscale serve or tunnel on the host proxies to loopback instead.
