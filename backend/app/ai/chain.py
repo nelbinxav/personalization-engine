@@ -24,7 +24,7 @@ import anthropic
 
 from app.ai import claude_code, pricing
 from app.ai.client import AuthUnavailable, get_client
-from app.ai.schemas import AnglesOut, DossierOut, DraftOut, strict_schema
+from app.ai.schemas import AnglesOut, DossierOut, DraftOut, SlotOut, strict_schema
 from app.models.common import Channel, Identity
 from app.models.prompt import Stage
 from app.models.prospect import Angle, Dossier, Draft, Fact, Personalization, SourceResult, Usage
@@ -37,6 +37,15 @@ logger = logging.getLogger(__name__)
 # means that stage's prefix cannot be cached.
 _VOLATILE_TOKEN = re.compile(r"\{\{\s*(research|dossier|angles|identity\.[\w]+|raw\.[^}]+)\s*\}\}")
 _ANY_TOKEN = re.compile(r"\{\{\s*([^}]+?)\s*\}\}")
+_TEMPLATE_TOKEN = re.compile(r"\{\{\s*template\s*\}\}")
+# A template carrying this slot is approved copy: the model writes only the
+# slot, and every other character, including the sending tool's own merge tags
+# such as {{firstName|there}}, goes out exactly as written.
+_SLOT = re.compile(r"\{\{\s*personali[sz]ation\s*\}\}")
+_SLOT_LINE = re.compile(
+    r"^[ \t]*\{\{\s*personali[sz]ation\s*\}\}[ \t]*(?:\r?\n|\Z)(?:[ \t]*\r?\n)?", re.MULTILINE
+)
+_SUBJECT_LINE = re.compile(r"\A\s*subject\s*:[ \t]*(.*?)[ \t]*(?:\r?\n|\Z)", re.IGNORECASE)
 
 
 class ChainError(Exception):
@@ -71,13 +80,74 @@ class ChainOutput:
 def render(text: str, context: dict[str, str]) -> str:
     """Substitute {{token}} placeholders. Unknown tokens are left untouched so a
     typo is visible in the output rather than silently blanking a line.
+
+    `{{token|fallback}}` uses the fallback when the token is known but empty.
     """
 
     def replace(match: re.Match) -> str:
-        token = match.group(1).strip()
-        return context.get(token, match.group(0))
+        name, has_fallback, fallback = match.group(1).partition("|")
+        name = name.strip()
+        if name not in context:
+            return match.group(0)
+        value = context[name]
+        if has_fallback and not value.strip():
+            return fallback.strip()
+        return value
 
     return _ANY_TOKEN.sub(replace, text)
+
+
+# Sending-tool merge tags the app can fill from the prospect's own row, so a
+# message reads right wherever it is pasted. {{sendingAccountFirstName}} is not
+# here: only the sending tool knows which inbox sends it.
+_MERGE_TAGS = {
+    "firstName": lambda c: c.get("identity.first_name")
+    or (c.get("identity.full_name") or "").split(" ")[0],
+    "lastName": lambda c: c.get("identity.last_name", ""),
+    "companyName": lambda c: c.get("identity.company", ""),
+}
+
+
+def render_copy(text: str, context: dict[str, str]) -> str:
+    """Render approved template copy: the app's own tokens plus the merge tags."""
+    merged = {**context, **{tag: value(context) or "" for tag, value in _MERGE_TAGS.items()}}
+    return render(text, merged)
+
+
+def split_subject(template_body: str) -> tuple[str | None, str]:
+    """Peel a leading "Subject: ..." line off a template."""
+    match = _SUBJECT_LINE.match(template_body)
+    if not match:
+        return None, template_body
+    return match.group(1) or None, template_body[match.end():].lstrip("\r\n")
+
+
+def fill_slot(template_body: str, context: dict[str, str], text: str) -> str:
+    """Place the model's text into the approved copy.
+
+    The app's own tokens and the merge tags it can fill ({{firstName|there}})
+    are rendered; anything else, like {{sendingAccountFirstName}}, survives
+    untouched for the sending tool.
+    """
+    body = render_copy(template_body, context)
+    return _SLOT.sub(lambda _: text.strip(), body)
+
+
+def generic_draft(template_body: str, context: dict[str, str]) -> Draft | None:
+    """The approved copy with the personalization left out, for a row whose
+    research supported no angle. It says nothing about the prospect, so it
+    cannot carry an invented fact; the row stays flagged for a human to decide.
+    None when the template has no slot, because then all of it is model-written.
+    """
+    if not _SLOT.search(template_body):
+        return None
+    subject, body = split_subject(template_body)
+    body = render_copy(body, context)
+    # A slot on its own line goes with the blank line after it; an inline one
+    # just disappears.
+    body = _SLOT_LINE.sub("", body)
+    body = _SLOT.sub("", body)
+    return Draft(subject=render_copy(subject, context) if subject else None, body=body)
 
 
 def build_context(
@@ -151,6 +221,26 @@ def format_constraints(constraints: Constraints, channel: Channel) -> str:
     if constraints.max_chars:
         lines.append(f"Body must be at most {constraints.max_chars} characters. This is a hard limit.")
     if constraints.has_subject:
+        limit = constraints.subject_max_chars or 78
+        lines.append(f"Include a subject line of at most {limit} characters.")
+    else:
+        lines.append("Do not include a subject line; return null for subject.")
+    return "\n".join(lines)
+
+
+def format_slot_constraints(
+    constraints: Constraints, channel: Channel, budget: int | None, fixed_subject: str | None
+) -> str:
+    lines = [
+        f"Channel: {channel.value}",
+        "Write only the text that replaces {{personalization}}. Every other line of the "
+        "template is sent exactly as written, so do not reproduce, reword or add to it.",
+    ]
+    if budget:
+        lines.append(f"Your text must be at most {budget} characters. This is a hard limit.")
+    if fixed_subject:
+        lines.append("The template fixes the subject line; return null for subject.")
+    elif constraints.has_subject:
         limit = constraints.subject_max_chars or 78
         lines.append(f"Include a subject line of at most {limit} characters.")
     else:
@@ -270,20 +360,37 @@ async def call_stage(
 # --------------------------------------------------------------------------
 
 
+def _subject_violations(subject: str | None, constraints: Constraints) -> list[str]:
+    if not constraints.has_subject:
+        return []
+    if not subject:
+        return ["A subject line is required but none was returned."]
+    if constraints.subject_max_chars and len(subject) > constraints.subject_max_chars:
+        return [
+            f"Subject is {len(subject)} characters; the limit is {constraints.subject_max_chars}."
+        ]
+    return []
+
+
+def _slot_violations(text: str, budget: int | None) -> list[str]:
+    problems: list[str] = []
+    if not text.strip():
+        problems.append("The personalization text is empty.")
+    if budget and len(text.strip()) > budget:
+        problems.append(f"The personalization is {len(text.strip())} characters; the limit is {budget}.")
+    leftover = _ANY_TOKEN.findall(text)
+    if leftover:
+        problems.append(f"Placeholders left in the personalization: {', '.join(leftover)}")
+    return problems
+
+
 def _constraint_violations(draft: Draft, constraints: Constraints) -> list[str]:
     problems: list[str] = []
     if constraints.max_chars and len(draft.body) > constraints.max_chars:
         problems.append(
             f"Body is {len(draft.body)} characters; the limit is {constraints.max_chars}."
         )
-    if constraints.has_subject:
-        if not draft.subject:
-            problems.append("A subject line is required but none was returned.")
-        elif constraints.subject_max_chars and len(draft.subject) > constraints.subject_max_chars:
-            problems.append(
-                f"Subject is {len(draft.subject)} characters; "
-                f"the limit is {constraints.subject_max_chars}."
-            )
+    problems.extend(_subject_violations(draft.subject, constraints))
     # An unresolved placeholder in a sent message is worse than a long one.
     leftover = _ANY_TOKEN.findall(draft.body)
     if leftover:
@@ -395,12 +502,14 @@ async def run_chain(
 
     if thin_context:
         # Stop before stage 3. Generating anyway is exactly the failure mode the
-        # citation guard exists to prevent.
+        # citation guard exists to prevent. A slot template still yields its
+        # approved copy with no personal line, which claims nothing about them.
         return ChainOutput(
             personalization=Personalization(
                 channel=channel,
                 dossier=dossier,
                 angles=angles,
+                draft=generic_draft(template.body, base_context),
                 model=model,
                 usage=usage_total,
                 cost_usd=cost_of(usage_total),
@@ -413,12 +522,32 @@ async def run_chain(
 
     # --- Stage 3: draft ---------------------------------------------------
     angles_text = format_angles(angles)
-    constraints_text = format_constraints(template.constraints, channel)
     # Deliberately NOT rendered: the template keeps its {{identity.first_name}}
     # placeholders so the stage-3 prefix stays identical across every row (and
     # therefore cacheable). The model fills them from the PROSPECT block in the
     # user turn, and `_constraint_violations` catches any it leaves behind.
     template_text = template.body
+
+    # Slot mode: the model writes only {{personalization}} and the code places it,
+    # so the approved copy cannot drift and a reply can never be just the opener.
+    slot_mode = bool(_SLOT.search(template.body))
+    fixed_subject, slot_body = split_subject(template.body) if slot_mode else (None, "")
+    budget: int | None = None
+    if slot_mode:
+        if template.constraints.max_chars:
+            fixed_length = len(fill_slot(slot_body, base_context, ""))
+            budget = template.constraints.max_chars - fixed_length
+            if budget <= 0:
+                warnings.append(
+                    f"The template alone is {fixed_length} characters, over its "
+                    f"{template.constraints.max_chars}-character limit. Raise the limit."
+                )
+                budget = None
+        constraints_text = format_slot_constraints(
+            template.constraints, channel, budget, fixed_subject
+        )
+    else:
+        constraints_text = format_constraints(template.constraints, channel)
 
     context = {
         **base_context,
@@ -427,25 +556,41 @@ async def run_chain(
         "template": template_text,
         "constraints": constraints_text,
     }
-    system_text, cacheable = _split_stable(prompts[int(Stage.draft)], context)
+    prompt_body = prompts[int(Stage.draft)]
+    if not _TEMPLATE_TOKEN.search(prompt_body):
+        # A prompt that never places the template would leave the model writing
+        # blind. Both blocks are identical for every row, so this stays cacheable.
+        prompt_body += "\n\nTEMPLATE\n{{template}}\n\nHARD CONSTRAINTS\n{{constraints}}"
+    system_text, cacheable = _split_stable(prompt_body, context)
     user_text = prospect_block(identity, angle=angles_text, dossier=dossier_text)
+    schema_model = SlotOut if slot_mode else DraftOut
+
+    def assemble(parsed: dict) -> tuple[Draft, list[str]]:
+        if slot_mode:
+            out = SlotOut.model_validate(parsed)
+            subject = render_copy(fixed_subject, base_context) if fixed_subject else out.subject
+            built = Draft(subject=subject, body=fill_slot(slot_body, base_context, out.personalization))
+            return built, _slot_violations(out.personalization, budget) + _subject_violations(
+                subject, template.constraints
+            )
+        out = DraftOut.model_validate(parsed)
+        built = Draft(subject=out.subject, body=out.body)
+        return built, _constraint_violations(built, template.constraints)
 
     result = await call_stage(
         client,
         system_text=system_text,
         user_text=user_text,
-        schema_model=DraftOut,
+        schema_model=schema_model,
         model=model,
         effort=effort_for(Stage.draft),
         max_tokens=max_tokens,
         cacheable=cacheable,
     )
     accumulate(result, Stage.draft)
-    parsed_draft = DraftOut.model_validate(result.parsed)
-    draft = Draft(subject=parsed_draft.subject, body=parsed_draft.body)
+    draft, violations = assemble(result.parsed)
 
     # One bounded re-ask on a constraint violation, then accept and flag.
-    violations = _constraint_violations(draft, template.constraints)
     constraint_warning = None
     if violations:
         retry_text = (
@@ -458,17 +603,15 @@ async def run_chain(
             client,
             system_text=system_text,
             user_text=retry_text,
-            schema_model=DraftOut,
+            schema_model=schema_model,
             model=model,
             effort=effort_for(Stage.draft),
             max_tokens=max_tokens,
             cacheable=cacheable,
         )
         accumulate(retry, Stage.draft)
-        retried = DraftOut.model_validate(retry.parsed)
-        retried_draft = Draft(subject=retried.subject, body=retried.body)
+        retried_draft, remaining = assemble(retry.parsed)
 
-        remaining = _constraint_violations(retried_draft, template.constraints)
         if remaining:
             # Keep the better of the two rather than discarding the work.
             draft = retried_draft if len(remaining) < len(violations) else draft

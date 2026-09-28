@@ -1,7 +1,15 @@
 """Chain logic that does not need the network: rendering, cacheability,
 constraint checking and schema shaping.
 """
-from app.ai.chain import _constraint_violations, _split_stable, render
+from app.ai.chain import (
+    _constraint_violations,
+    _slot_violations,
+    _split_stable,
+    fill_slot,
+    generic_draft,
+    render,
+    split_subject,
+)
 from app.ai.schemas import AnglesOut, DossierOut, DraftOut, strict_schema
 from app.models.prospect import Draft
 from app.models.template import Constraints
@@ -70,6 +78,86 @@ def test_unresolved_placeholder_is_a_violation():
 
 def test_non_email_channel_must_not_demand_a_subject():
     assert _constraint_violations(Draft(body="hi"), Constraints(max_chars=300)) == []
+
+
+SLOT_TEMPLATE = """Subject: the Ferrari-to-the-grocery-store problem
+
+Hi {{firstName|there}},
+
+{{personalization}}
+
+You're running data engineering at {{companyName|your company}}.
+
+{{sendingAccountFirstName}}
+Data Engineering, BigHammer.ai
+"""
+
+
+def test_split_subject_peels_a_leading_subject_line():
+    subject, body = split_subject(SLOT_TEMPLATE)
+    assert subject == "the Ferrari-to-the-grocery-store problem"
+    assert body.startswith("Hi {{firstName|there}},")
+
+    assert split_subject("Hi there") == (None, "Hi there")
+
+
+PROSPECT = {"identity.first_name": "Ada", "identity.company": "Analytical"}
+
+
+def test_fill_slot_fills_merge_tags_and_leaves_the_sender_for_the_sending_tool():
+    _, body = split_subject(SLOT_TEMPLATE)
+    out = fill_slot(body, PROSPECT, "  The ICE Mortgage Monitor never stops.  ")
+    assert out == (
+        "Hi Ada,\n\n"
+        "The ICE Mortgage Monitor never stops.\n\n"
+        "You're running data engineering at Analytical.\n\n"
+        "{{sendingAccountFirstName}}\nData Engineering, BigHammer.ai\n"
+    )
+
+
+def test_merge_tags_fall_back_when_the_prospect_field_is_empty():
+    _, body = split_subject(SLOT_TEMPLATE)
+    out = fill_slot(body, {"identity.first_name": "", "identity.company": None}, "x")
+    assert out.startswith("Hi there,")
+    assert "at your company." in out
+
+
+def test_first_name_falls_back_to_the_full_name():
+    out = fill_slot("Hi {{firstName|there}}", {"identity.full_name": "Grace Hopper"}, "")
+    assert out == "Hi Grace"
+
+
+def test_render_fallback_leaves_unknown_tokens_visible():
+    assert render("{{nope|x}}", {}) == "{{nope|x}}"
+    assert render("{{known|x}}", {"known": "  "}) == "x"
+
+
+def test_fill_slot_renders_the_apps_own_tokens():
+    out = fill_slot("Hi {{identity.first_name}},\n{{ personalisation }}", {"identity.first_name": "Ada"}, "x")
+    assert out == "Hi Ada,\nx"
+
+
+def test_generic_draft_drops_the_slot_line_and_keeps_the_rest():
+    draft = generic_draft(SLOT_TEMPLATE, PROSPECT)
+    assert draft.subject == "the Ferrari-to-the-grocery-store problem"
+    assert draft.body == (
+        "Hi Ada,\n\n"
+        "You're running data engineering at Analytical.\n\n"
+        "{{sendingAccountFirstName}}\nData Engineering, BigHammer.ai\n"
+    )
+
+
+def test_generic_draft_handles_an_inline_slot_and_a_slotless_template():
+    assert generic_draft("Hi Ada - {{personalization}}", {}).body == "Hi Ada - "
+    # Without a slot the whole message is model-written, so there is no safe copy.
+    assert generic_draft("Hi {{identity.first_name}}", {}) is None
+
+
+def test_slot_violations():
+    assert _slot_violations("A specific line.", budget=100) == []
+    assert any("empty" in v for v in _slot_violations("  ", budget=100))
+    assert any("limit is 5" in v for v in _slot_violations("too long", budget=5))
+    assert any("Placeholders" in v for v in _slot_violations("Hi {{firstName}}", budget=None))
 
 
 def test_strict_schema_inlines_refs_and_closes_objects():
