@@ -65,6 +65,20 @@ class DraftOut(BaseModel):
     body: str = Field(description="The message body, ready to send, with no placeholders left.")
 
 
+class SlotOut(BaseModel):
+    """Stage 3 when the template has a {{personalization}} slot: the model writes
+    only the slot and the code places it into the approved copy."""
+
+    personalization: str = Field(
+        description="Only the text that replaces {{personalization}}. No greeting, "
+        "no sign-off and no other template copy."
+    )
+    subject: str | None = Field(
+        default=None,
+        description="Subject line, only when the template does not fix one. Otherwise null.",
+    )
+
+
 def strict_schema(model: type[BaseModel]) -> dict:
     """Turn a pydantic model into a schema the API's json_schema format accepts.
 

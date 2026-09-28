@@ -85,6 +85,20 @@ warning. Relatedly, the channel template is injected into the stage-3 prompt
 **unrendered**, placeholders intact, for the same reason - `render()` is
 single-pass so they survive, and the model fills them from the user turn.
 
+**Slot templates.** A template containing `{{personalization}}` is approved
+copy. The model returns only that slot (`SlotOut`); `fill_slot()` places it and
+renders `identity.*`/`raw.*` plus the sending-tool merge tags the app can fill
+(`{{firstName|there}}`, `{{lastName}}`, `{{companyName|your company}}`; the
+`|fallback` applies when the field is empty). Any other `{{...}}`, such as
+`{{sendingAccountFirstName}}`, is left for the sending platform. A leading
+`Subject:` line fixes the subject. The length limit applies to the whole email,
+so the slot gets whatever the fixed copy leaves. A `thin_context` row on a slot
+template still gets a draft: `generic_draft()`, the approved copy with the slot
+line removed. It claims nothing about the prospect, so it does not weaken the
+citation guard, and the row stays flagged. If the active stage-3 prompt
+never places `{{template}}`, the chain appends the template and constraints to
+it so the model never writes blind.
+
 ### Subscription mode (`claude_code`)
 
 The third credential mode runs each stage through the operator's own Claude
