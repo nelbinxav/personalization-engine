@@ -35,6 +35,14 @@ class Dossier(BaseModel):
     facts: list[Fact] = Field(default_factory=list)
     recent_events: list[Fact] = Field(default_factory=list)
     tech_signals: list[Fact] = Field(default_factory=list)
+    # Stage 1's own verdict on whether anything it found is worth looking for
+    # an angle in. False skips stage 2. True by default so rows written before
+    # this existed read as they always did.
+    has_signal: bool = True
+    signal_note: str = ""
+    # Why this person should not be contacted as addressed, when a source says
+    # so (left the company, died, company gone). Empty when there is no issue.
+    contact_issue: str = ""
 
 
 class Angle(BaseModel):
@@ -50,6 +58,9 @@ class Draft(BaseModel):
 
     subject: str | None = None
     body: str = ""
+    # The one line the model wrote, when the template has a slot. Kept apart
+    # from the body so a sending tool can take just this as a custom variable.
+    personal_line: str | None = None
 
 
 class Usage(BaseModel):
@@ -76,12 +87,21 @@ class Personalization(BaseModel):
     draft: Draft | None = None
     model: str | None = None
     usage: Usage = Field(default_factory=Usage)
+    # The same usage split by stage number, to show where a row's tokens went.
+    usage_by_stage: dict[str, Usage] = Field(default_factory=dict)
     cost_usd: float = 0.0
     prompt_versions: dict[str, int] = Field(default_factory=dict)
     template_version: int | None = None
     generated_at: datetime | None = None
     # Set when stage 3 output violated the template constraints even after a re-ask.
     constraint_warning: str | None = None
+    # Whether the research showed the prospect has the problem we solve (for
+    # example that they run the platform we cut costs on), with the dossier item
+    # that showed it. None when stage 2 did not run.
+    fit_established: bool | None = None
+    fit_evidence: str | None = None
+    # True when the template's ask-first copy was used instead of the main copy.
+    ask_first: bool = False
 
 
 class Prospect(Doc):
@@ -100,6 +120,24 @@ class Prospect(Doc):
     personalize_error: str | None = None
 
 
+def outreach_of(prospect: "Prospect") -> str:
+    """What to do with a row once it has been personalized, in one word.
+
+      personalised  a line was written for this lead; send it
+      generic       no personal line, but the approved copy is there; send it
+      hold          do not send until someone has looked (see the status note)
+
+    Empty for a row that has not been personalized yet.
+    """
+    status = prospect.personalize_status
+    if status in (RowStatus.pending, RowStatus.queued, RowStatus.running, RowStatus.skipped):
+        return ""
+    draft = prospect.personalization.draft
+    if status in (RowStatus.failed, RowStatus.needs_review) or not draft or not draft.body.strip():
+        return "hold"
+    return "generic" if status is RowStatus.thin_context else "personalised"
+
+
 class ProspectOut(BaseModel):
     id: str
     row_index: int
@@ -114,4 +152,6 @@ class ProspectOut(BaseModel):
     body: str | None = None
     angle: str | None = None
     evidence: str | None = None
+    # personalised / generic / hold, see `outreach_of`.
+    outreach: str = ""
     cost_usd: float = 0.0

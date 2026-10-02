@@ -154,7 +154,7 @@ async def upload_out(doc: dict) -> UploadOut:
         {"upload_id": upload_id, "scrape_status": "done"}
     )
     personalized = await mongo.prospects().count_documents(
-        {"upload_id": upload_id, "personalize_status": {"$in": ["done", "thin_context"]}}
+        {"upload_id": upload_id, "personalize_status": {"$in": ["done", "thin_context", "needs_review"]}}
     )
     return UploadOut(
         id=upload_id,

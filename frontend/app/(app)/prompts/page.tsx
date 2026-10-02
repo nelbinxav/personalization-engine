@@ -408,7 +408,7 @@ function PreviewCard({ preview }: { preview: PreviewResult }) {
         <li>
           <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">2 · Angle</p>
           {preview.thin_context ? (
-            <Alert tone="warning" title="Needs review: not enough to personalize">
+            <Alert tone="warning" title="No personal line: the research did not support one">
               {preview.reason}
             </Alert>
           ) : preview.angles.length > 0 ? (

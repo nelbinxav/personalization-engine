@@ -25,7 +25,18 @@ import {
 } from '@/components/ui'
 import { api } from '@/lib/api'
 import type { Job, JobType, Upload } from '@/lib/types'
-import { PHASE_LABEL, duration, isActive, money, nextAction, timeAgo, useReadiness } from '@/lib/workflow'
+import {
+  PHASE_LABEL,
+  clockTime,
+  duration,
+  isActive,
+  isLive,
+  isWaiting,
+  money,
+  nextAction,
+  timeAgo,
+  useReadiness,
+} from '@/lib/workflow'
 
 type Filter = 'all' | 'active' | 'attention'
 
@@ -75,7 +86,7 @@ function JobsInner() {
 
   // Poll while anything is in flight; stop once everything has settled so an
   // idle tab is not hammering the API.
-  const anyActive = jobs?.some(isActive)
+  const anyActive = jobs?.some(isLive)
   useEffect(() => {
     if (!anyActive) return
     const timer = setInterval(refresh, 3000)
@@ -97,6 +108,7 @@ function JobsInner() {
       filter === 'active' ? isActive(job) : filter === 'attention' ? needsAttention(job) : true,
     ) ?? []
   const parked = jobs?.filter((j) => j.status === 'blocked_auth') ?? []
+  const waiting = jobs?.filter(isWaiting) ?? []
 
   return (
     <>
@@ -127,6 +139,18 @@ function JobsInner() {
         >
           {parked[0].error ?? 'Claude could not be reached.'} Finished rows kept their results, and Resume picks up
           only the rows that never ran.
+        </Alert>
+      )}
+
+      {waiting.length > 0 && (
+        <Alert
+          tone="info"
+          className="mb-6"
+          title={`${waiting.length === 1 ? 'A job is' : `${waiting.length} jobs are`} waiting for a limit to reset`}
+        >
+          Nothing to do: {waiting.length === 1 ? 'it restarts' : 'they restart'} by{' '}
+          {waiting.length === 1 ? 'itself' : 'themselves'} {clockTime(waiting[0].resume_at)} and{' '}
+          {waiting.length === 1 ? 'picks' : 'pick'} up the rows that have not run. Finished rows kept their results.
         </Alert>
       )}
 
@@ -235,6 +259,9 @@ function JobsInner() {
                   </td>
                   <td>
                     <StatusBadge status={job.status} title={job.error || undefined} />
+                    {isWaiting(job) && (
+                      <div className="mt-1 text-xs text-muted-foreground">Resumes {clockTime(job.resume_at)}</div>
+                    )}
                   </td>
                   <td>
                     <Progress
@@ -257,14 +284,14 @@ function JobsInner() {
                   </td>
                   <td>
                     <div className="flex justify-end gap-2">
-                      {isActive(job) && (
+                      {isLive(job) && (
                         <Button size="sm" variant="ghost" onClick={() => act(job, 'cancel')}>
                           Cancel
                         </Button>
                       )}
-                      {(job.status === 'blocked_auth' || job.status === 'cancelled') && (
+                      {(job.status === 'blocked_auth' || job.status === 'cancelled' || isWaiting(job)) && (
                         <Button size="sm" variant="secondary" onClick={() => act(job, 'resume')}>
-                          Resume
+                          {isWaiting(job) ? 'Resume now' : 'Resume'}
                         </Button>
                       )}
                       <LinkButton href={`/jobs/${job.id}`} size="sm" variant="outline">

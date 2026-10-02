@@ -10,8 +10,9 @@ from pydantic import BaseModel, Field
 class FactOut(BaseModel):
     text: str = Field(description="One specific, verifiable fact about the prospect or company.")
     source_key: str = Field(
-        description="Which source this came from: website, rss, news, "
-        "linkedin_profile or linkedin_company."
+        description="Which source this came from, exactly as its '### source:' heading names "
+        "it, for example linkedin_posts, podcasts, linkedin_profile, linkedin_company, news, "
+        "website or rss."
     )
 
 
@@ -27,6 +28,22 @@ class DossierOut(BaseModel):
     tech_signals: list[FactOut] = Field(
         default_factory=list,
         description="Technology, tooling or platform signals visible in the sources.",
+    )
+    contact_issue: str = Field(
+        default="",
+        description="If the sources show this person should not be contacted as addressed, "
+        "say why in one sentence: they have died, they have left this company, or the "
+        "company has closed or been absorbed into another. Otherwise an empty string. Do "
+        "not guess: it needs a source that says so.",
+    )
+    has_signal: bool = Field(
+        description="True if at least one item could matter to what we sell, or is something "
+        "the prospect said themselves about their work. False only when every item is "
+        "unrelated or nothing reliable was found. When unsure, true: false ends the work on "
+        "this prospect."
+    )
+    signal_note: str = Field(
+        default="", description="One short sentence giving the reason for has_signal."
     )
 
 
@@ -53,6 +70,18 @@ class AnglesOut(BaseModel):
     )
     reason: str = Field(
         default="", description="If sufficient is false, one line on what was missing."
+    )
+    fit_established: bool = Field(
+        description="True only if a dossier item shows this company itself has the problem "
+        "our offer solves: it runs the platform or technology the offer targets, or is "
+        "hiring people to work on it in its own team. Being on our list, the prospect's "
+        "role or industry, selling services around the technology, and writing about it do "
+        "not count. When unsure, false."
+    )
+    fit_evidence: str = Field(
+        default="",
+        description="If fit_established is true, the exact dossier item that shows it. "
+        "Otherwise an empty string.",
     )
 
 

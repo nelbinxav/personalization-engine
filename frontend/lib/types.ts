@@ -7,6 +7,7 @@ export type JobStatus =
   | 'failed'
   | 'cancelled'
   | 'blocked_auth'
+  | 'rate_limited'
 export type RowStatus =
   | 'pending'
   | 'queued'
@@ -15,6 +16,7 @@ export type RowStatus =
   | 'failed'
   | 'skipped'
   | 'thin_context'
+  | 'needs_review'
 
 export interface Upload {
   id: string
@@ -66,6 +68,12 @@ export interface Job {
   created_at: string
   started_at: string | null
   finished_at: string | null
+  /** Only while status is rate_limited: when the worker restarts the job. */
+  resume_at: string | null
+  /** All tokens the job's rows used. */
+  tokens: number
+  /** Each pause for a limit: when, why, and when it resumed. */
+  limit_events: { at: string; reason: string; resume_at: string | null }[]
 }
 
 export interface Identity {
@@ -95,6 +103,8 @@ export interface ProspectRow {
   body: string | null
   angle: string | null
   evidence: string | null
+  /** What to do with a personalized row: personalised, generic, hold, or empty. */
+  outreach: '' | 'personalised' | 'generic' | 'hold'
   cost_usd: number
 }
 
@@ -119,6 +129,8 @@ export interface Template {
   channel: Channel
   name: string
   body: string
+  /** Copy for rows whose research does not show the prospect has the problem. */
+  fallback_body: string
   constraints: Constraints
   version: number
   is_active: boolean
@@ -142,6 +154,7 @@ export interface AppSettings {
   ai: {
     mode: 'oauth' | 'api_key' | 'claude_code'
     model: string
+    stage_models: Record<string, string>
     effort: Record<string, string>
     enabled_stages: number[]
     max_tokens: number
@@ -151,6 +164,8 @@ export interface AppSettings {
   concurrency: number
   offer_context: string
   linkedin_provider: string
+  linkedin_daily_limit: number
+  linkedin_reads_per_hour: number
 }
 
 export interface SettingsResponse {
@@ -179,6 +194,9 @@ export interface PreviewResult {
   } | null
   angles: { angle: string; evidence: string; source_key: string }[]
   draft: { subject: string | null; body: string } | null
+  fit_established?: boolean | null
+  fit_evidence?: string | null
+  ask_first?: boolean
   thin_context: boolean
   reason: string
   warnings: string[]

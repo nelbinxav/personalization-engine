@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!--
+    The LinkedIn sign-in window, with paste.
+
+    The image's own viewer (vnc_lite.html) shows the engine's browser but cannot
+    paste into it: that browser has its own clipboard, and the viewer swallows
+    Cmd+V. This page is the same viewer plus one thing: Cmd+V (or the Paste
+    button) reads this computer's clipboard and types it into whatever field is
+    focused in the sign-in browser, as keystrokes. Nothing is stored or sent
+    anywhere except down the same connection the keyboard already uses.
+
+    Mounted into the linkedin service as /usr/share/novnc/pe.html (see
+    docker-compose.yml); based on noVNC's vnc_lite.html (2-Clause BSD).
+    -->
+    <title>LinkedIn sign-in</title>
+    <meta charset="utf-8">
+    <style>
+        html { height: 100%; }
+        body { margin: 0; background: #1f2430; height: 100%; display: flex; flex-direction: column;
+               font: 13px -apple-system, "Segoe UI", Helvetica, sans-serif; }
+        #top_bar { display: flex; align-items: center; gap: 10px; background: #2b3245; color: #fff; padding: 8px 12px; }
+        #status { flex: 1; font-weight: 600; }
+        #hint { color: #c5cbe0; }
+        button { background: #4b6bfb; color: #fff; border: 0; border-radius: 6px; padding: 6px 12px;
+                 font: inherit; font-weight: 600; cursor: pointer; }
+        button:hover { background: #3f5ce0; }
+        #fallback { display: none; gap: 6px; align-items: center; }
+        #fallback input { width: 260px; padding: 5px 8px; border-radius: 6px; border: 1px solid #5a6382;
+                          background: #1f2430; color: #fff; font: inherit; }
+        #screen { flex: 1; overflow: hidden; }
+    </style>
+    <script type="module" crossorigin="anonymous">
+        import RFB from './core/rfb.js';
+
+        const el = (id) => document.getElementById(id);
+        const status = (text) => { el('status').textContent = text; };
+
+        function readParam(name, fallback) {
+            const match = ''.concat(document.location.href, window.location.hash)
+                .match(new RegExp('.*[?&]' + name + '=([^&#]*)'));
+            return match ? decodeURIComponent(match[1]) : fallback;
+        }
+
+        let url = (window.location.protocol === 'https:' ? 'wss' : 'ws') + '://' + window.location.hostname;
+        if (window.location.port) url += ':' + window.location.port;
+        url += '/' + readParam('path', 'websockify');
+
+        const rfb = new RFB(el('screen'), url, {});
+        rfb.scaleViewport = true;
+        rfb.addEventListener('connect', () => status('Sign in to LinkedIn below'));
+        rfb.addEventListener('disconnect', (e) =>
+            status(e.detail.clean ? 'Sign-in window closed. You can close this tab.' : 'Connection lost. Press Connect LinkedIn again in Settings.'));
+
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        // Type text into the sign-in browser one key at a time. Keystrokes do
+        // not depend on the two clipboards being linked, which they are not.
+        async function typeText(text) {
+            for (const char of text.replace(/[\r\n]+$/, '')) {
+                const code = char.codePointAt(0);
+                if (code === 10 || code === 13) continue;      // never press Enter for the user
+                const keysym = code < 0x100 ? code : 0x01000000 + code;
+                rfb.sendKey(keysym, null, true);
+                rfb.sendKey(keysym, null, false);
+                await sleep(15);
+            }
+            rfb.focus();
+        }
+
+        async function pasteFromClipboard() {
+            try {
+                const text = await navigator.clipboard.readText();
+                if (!text) { status('The clipboard is empty. Copy the text first.'); return; }
+                await typeText(text);
+                status('Pasted.');
+            } catch (err) {
+                // The browser refused clipboard access: offer a box to paste into instead.
+                el('fallback').style.display = 'flex';
+                el('fallback_input').focus();
+                status('Paste into the box on the right, then press Type it.');
+            }
+        }
+
+        // Cmd+V / Ctrl+V anywhere on this page pastes into the sign-in browser.
+        // Capture phase, so this runs before the viewer forwards the keys.
+        window.addEventListener('keydown', (e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v' && document.activeElement !== el('fallback_input')) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                pasteFromClipboard();
+            }
+        }, true);
+
+        el('paste').onclick = pasteFromClipboard;
+        el('type_it').onclick = async () => {
+            const box = el('fallback_input');
+            const text = box.value;
+            box.value = '';
+            await typeText(text);
+            status('Pasted.');
+        };
+
+        // Self-test hook used when checking the page: types the given text once connected.
+        const selftest = readParam('selftest');
+        if (selftest) rfb.addEventListener('connect', () => setTimeout(() => typeText(selftest), 1500));
+    </script>
+</head>
+<body>
+    <div id="top_bar">
+        <div id="status">Connecting</div>
+        <span id="hint">Click a field below, then press Cmd+V or</span>
+        <button id="paste" title="Types this computer's clipboard into the field you clicked">Paste</button>
+        <span id="fallback">
+            <input id="fallback_input" type="password" placeholder="Paste here" autocomplete="off">
+            <button id="type_it">Type it</button>
+        </span>
+    </div>
+    <div id="screen"></div>
+</body>
+</html>

@@ -66,4 +66,5 @@ async def provider_key(name: str) -> str | None:
         "apify": env.apify_token,
         "google_service_account_json": env.google_service_account_json,
         "anthropic": env.anthropic_api_key,
+        "openai": env.openai_api_key,
     }.get(name)

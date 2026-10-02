@@ -3,6 +3,7 @@
 import { Bot, Building2, KeyRound, Microscope, RefreshCw, Terminal } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
+import { LinkedInConnection } from '@/components/linkedin-connection'
 import {
   Alert,
   Badge,
@@ -24,13 +25,21 @@ import type { AiStatus, SettingsResponse } from '@/lib/types'
 
 const KEY_FIELDS: { name: string; label: string; hint: string }[] = [
   { name: 'jina', label: 'Jina Reader', hint: 'Website content. Optional: works without a key at a lower rate limit.' },
-  { name: 'serper', label: 'Serper.dev', hint: 'Google News. Required for the news source.' },
+  { name: 'serper', label: 'Serper.dev', hint: 'Google News. Optional: without it, news comes from a free web search.' },
   { name: 'apify', label: 'Apify', hint: 'LinkedIn profile and company pages.' },
+  { name: 'openai', label: 'OpenAI API key', hint: 'Only needed when a stage is set to an OpenAI model such as GPT-6 Luna. Billed per token by OpenAI.' },
   {
     name: 'google_service_account_json',
     label: 'Google service account JSON',
     hint: 'One line of JSON. Share private sheets with this account’s email. Public sheets need nothing.',
   },
+]
+
+// The three chain stages, in the order they run.
+const STAGES = [
+  { key: '1', label: 'Gather facts', note: 'Reads the research. The bulk of the tokens, the least judgement.' },
+  { key: '2', label: 'Choose the angle', note: 'Decides what is relevant and whether there is evidence of fit.' },
+  { key: '3', label: 'Write the message', note: 'The words the prospect reads.' },
 ]
 
 const SECTIONS = [
@@ -64,7 +73,11 @@ export default function SettingsPage() {
 
   const [offer, setOffer] = useState('')
   const [concurrency, setConcurrency] = useState(4)
-  const [model, setModel] = useState('claude-opus-5')
+  const [linkedinDailyLimit, setLinkedinDailyLimit] = useState(150)
+  const [linkedinPerHour, setLinkedinPerHour] = useState(20)
+  const [model, setModel] = useState('claude-sonnet-5-5')
+  const [stageModels, setStageModels] = useState<Record<string, string>>({})
+  const [efforts, setEfforts] = useState<Record<string, string>>({})
   const [enabledSources, setEnabledSources] = useState<string[]>([])
   const [linkedinProvider, setLinkedinProvider] = useState('apify')
   const [keyEdits, setKeyEdits] = useState<Record<string, string>>({})
@@ -87,7 +100,11 @@ export default function SettingsPage() {
     setAi(status)
     setOffer(settings.settings.offer_context)
     setConcurrency(settings.settings.concurrency)
+    setLinkedinDailyLimit(settings.settings.linkedin_daily_limit)
+    setLinkedinPerHour(settings.settings.linkedin_reads_per_hour)
     setModel(settings.settings.ai.model)
+    setStageModels(settings.settings.ai.stage_models ?? {})
+    setEfforts(settings.settings.ai.effort ?? {})
     setEnabledSources(settings.settings.enabled_sources)
     setLinkedinProvider(settings.settings.linkedin_provider)
     setMethod((current) => current ?? status?.mode ?? 'claude_code')
@@ -102,7 +119,14 @@ export default function SettingsPage() {
     !!saved &&
     (offer !== saved.offer_context ||
       concurrency !== saved.concurrency ||
+      linkedinDailyLimit !== saved.linkedin_daily_limit ||
+      linkedinPerHour !== saved.linkedin_reads_per_hour ||
       model !== saved.ai.model ||
+      STAGES.some(
+        (st) =>
+          (stageModels[st.key] ?? '') !== (saved.ai.stage_models?.[st.key] ?? '') ||
+          (efforts[st.key] ?? 'high') !== (saved.ai.effort?.[st.key] ?? 'high'),
+      ) ||
       linkedinProvider !== saved.linkedin_provider ||
       [...enabledSources].sort().join() !== [...saved.enabled_sources].sort().join() ||
       Object.values(keyEdits).some(Boolean) ||
@@ -119,7 +143,11 @@ export default function SettingsPage() {
     if (!saved) return
     setOffer(saved.offer_context)
     setConcurrency(saved.concurrency)
+    setLinkedinDailyLimit(saved.linkedin_daily_limit)
+    setLinkedinPerHour(saved.linkedin_reads_per_hour)
     setModel(saved.ai.model)
+    setStageModels(saved.ai.stage_models ?? {})
+    setEfforts(saved.ai.effort ?? {})
     setEnabledSources(saved.enabled_sources)
     setLinkedinProvider(saved.linkedin_provider)
     setKeyEdits({})
@@ -135,9 +163,11 @@ export default function SettingsPage() {
       await api.put('/settings', {
         offer_context: offer,
         concurrency,
+        linkedin_daily_limit: linkedinDailyLimit,
+        linkedin_reads_per_hour: linkedinPerHour,
         enabled_sources: enabledSources,
         linkedin_provider: linkedinProvider,
-        ai: { model },
+        ai: { model, stage_models: stageModels, effort: efforts },
         provider_keys: Object.keys(keys).length ? keys : undefined,
       })
       setKeyEdits({})
@@ -269,7 +299,7 @@ export default function SettingsPage() {
                 <div className="space-y-3 text-sm">
                   <p className="text-muted-foreground">
                     Runs each stage through the official Claude Code tool, signed in with your own account. When a
-                    plan limit is hit, the job pauses; resume it once the limit resets.
+                    plan limit is hit, the job pauses and restarts by itself once the limit resets.
                   </p>
                   {liveMode === 'claude_code' ? (
                     <>
@@ -415,7 +445,7 @@ export default function SettingsPage() {
             </div>
 
             <div className="mt-5 border-t border-border pt-5">
-              <Field id="model" label="Model" hint="Used for all three stages. Saved with the bar at the bottom.">
+              <Field id="model" label="Default model" hint="Used by every stage that does not pick its own below. Saved with the bar at the bottom.">
                 <Select id="model" value={model} onChange={(e) => setModel(e.target.value)} className="max-w-sm">
                   {data?.catalog.models.map((m) => (
                     <option key={m.id} value={m.id}>
@@ -424,6 +454,50 @@ export default function SettingsPage() {
                   ))}
                 </Select>
               </Field>
+
+              <div className="mt-5">
+                <p className="mb-1 text-sm font-medium">Per stage</p>
+                <p className="hint mb-3 mt-0">
+                  Give a stage its own model, and set how hard it thinks. A cheap model on the first stage and lower
+                  effort are the two biggest savings. An OpenAI model needs the OpenAI key under Keys and is billed by
+                  OpenAI even when Claude runs on your subscription.
+                </p>
+                <div className="space-y-3">
+                  {STAGES.map((st) => (
+                    <div key={st.key} className="grid gap-2 rounded-lg border border-border p-3 sm:grid-cols-[1fr_auto_auto] sm:items-center">
+                      <div>
+                        <p className="text-sm font-medium">
+                          {st.key}. {st.label}
+                        </p>
+                        <p className="text-xs text-muted-foreground">{st.note}</p>
+                      </div>
+                      <Select
+                        aria-label={`Model for stage ${st.key}`}
+                        value={stageModels[st.key] ?? ''}
+                        onChange={(e) => setStageModels({ ...stageModels, [st.key]: e.target.value })}
+                      >
+                        <option value="">Default model</option>
+                        {data?.catalog.models.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.label}
+                          </option>
+                        ))}
+                      </Select>
+                      <Select
+                        aria-label={`Thinking effort for stage ${st.key}`}
+                        value={efforts[st.key] ?? 'high'}
+                        onChange={(e) => setEfforts({ ...efforts, [st.key]: e.target.value })}
+                      >
+                        {data?.catalog.efforts.map((effort) => (
+                          <option key={effort} value={effort}>
+                            Effort: {effort}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </Card>
         </section>
@@ -486,10 +560,42 @@ export default function SettingsPage() {
                   ))}
                 </Select>
               </Field>
+              {linkedinProvider === 'account' && (
+                <Field
+                  id="linkedin-daily-limit"
+                  label="LinkedIn reads per day"
+                  hint="A row uses about two. When the day's limit is used up, the research job waits and carries on tomorrow. Lower is safer for the LinkedIn account."
+                >
+                  <Input
+                    id="linkedin-daily-limit"
+                    type="number"
+                    min={1}
+                    max={1000}
+                    value={linkedinDailyLimit}
+                    onChange={(e) => setLinkedinDailyLimit(Number(e.target.value))}
+                  />
+                </Field>
+              )}
+              {linkedinProvider === 'account' && (
+                <Field
+                  id="linkedin-per-hour"
+                  label="LinkedIn reads per hour"
+                  hint={`One read about every ${Math.round(3600 / Math.max(linkedinPerHour, 1) / 6) / 10} minutes, at uneven intervals. A day's ${linkedinDailyLimit} reads take about ${Math.round((linkedinDailyLimit / Math.max(linkedinPerHour, 1)) * 10) / 10} hours. Slower is safer.`}
+                >
+                  <Input
+                    id="linkedin-per-hour"
+                    type="number"
+                    min={1}
+                    max={120}
+                    value={linkedinPerHour}
+                    onChange={(e) => setLinkedinPerHour(Number(e.target.value))}
+                  />
+                </Field>
+              )}
               <Field
                 id="concurrency"
                 label="Rows in parallel"
-                hint="Higher is faster, and also the rate at which spend accrues."
+                hint="Higher is faster, and also the rate at which spend accrues. Applies within seconds, to running jobs too."
               >
                 <Input
                   id="concurrency"
@@ -501,6 +607,7 @@ export default function SettingsPage() {
                 />
               </Field>
             </div>
+            {linkedinProvider === 'account' && <LinkedInConnection />}
           </Card>
         </section>
 

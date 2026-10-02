@@ -25,7 +25,7 @@ export const FIELD_META: Record<string, { label: string; help?: string }> = {
   first_name: { label: 'First name', help: 'Preferred in greetings.' },
   last_name: { label: 'Last name' },
   title: { label: 'Job title' },
-  company: { label: 'Company', help: 'Drives the Google News search.' },
+  company: { label: 'Company', help: 'Drives the news and podcast searches.' },
   website: { label: 'Website', help: 'Scraped for site content and an RSS feed.' },
   linkedin_url: { label: 'LinkedIn profile URL', help: 'Scraped for the personal profile.' },
   linkedin_company_url: { label: 'LinkedIn company URL', help: 'Scraped for the company page.' },
@@ -84,6 +84,25 @@ export function duration(start: string | null, end: string | null): string | nul
 
 export function isActive(job: Pick<Job, 'status'>): boolean {
   return job.status === 'queued' || job.status === 'running'
+}
+
+/** Paused for a limit (Claude usage, or the daily LinkedIn cap). It restarts by itself. */
+export function isWaiting(job: Pick<Job, 'status'>): boolean {
+  return job.status === 'rate_limited'
+}
+
+/** Still going to change without anyone touching it: keep polling. */
+export function isLive(job: Pick<Job, 'status'>): boolean {
+  return isActive(job) || isWaiting(job)
+}
+
+/** "at 3:40 PM", or with the day when it is not today. */
+export function clockTime(iso: string | null | undefined): string {
+  if (!iso) return 'soon'
+  const date = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`)
+  const time = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  const sameDay = date.toDateString() === new Date().toDateString()
+  return sameDay ? `at ${time}` : `on ${date.toLocaleDateString([], { weekday: 'short' })} at ${time}`
 }
 
 /* ---------------------------------------------------------------- workflow */

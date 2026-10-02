@@ -1,5 +1,7 @@
 import logging
+from datetime import datetime, timedelta, timezone
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
@@ -16,11 +18,22 @@ from app.ai.client import (
 from app.api.deps import current_operator
 from app.core import settings_store
 from app.core.security import mask_secret
+from app.db import mongo
 from app.models.settings import AppSettings, CredentialMode, SettingsIn
+from app.sources import linkedin_account, registry
+from app.sources.base import SourceError
 from app.sources.registry import source_catalog
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["settings"], dependencies=[Depends(current_operator)])
+
+
+_USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
 
 
 class OAuthCompleteRequest(BaseModel):
@@ -49,8 +62,17 @@ async def get_settings_doc() -> dict:
             "linkedin_providers": [
                 {
                     "key": "apify",
-                    "label": "Apify (implemented)",
-                    "note": "Marketplace actors, pay per result.",
+                    "label": "Apify",
+                    "note": "Marketplace actors, pay per result. Profiles and company pages "
+                    "only: it cannot read recent posts.",
+                },
+                {
+                    "key": "account",
+                    "label": "Your LinkedIn account (Agent Reach route)",
+                    "note": "Reads profiles, company pages and recent posts through a signed-in "
+                    "LinkedIn account. Automated access is against LinkedIn's terms and the "
+                    "account can be restricted, so reads are paced and capped per day. Needs "
+                    "the LinkedIn service running and signed in (see deploy/LINKEDIN.md).",
                 },
                 {
                     "key": "brightdata",
@@ -88,6 +110,10 @@ async def update_settings(payload: SettingsIn) -> dict:
         settings.offer_context = payload.offer_context
     if payload.linkedin_provider is not None:
         settings.linkedin_provider = payload.linkedin_provider
+    if payload.linkedin_daily_limit is not None:
+        settings.linkedin_daily_limit = max(1, min(payload.linkedin_daily_limit, 1000))
+    if payload.linkedin_reads_per_hour is not None:
+        settings.linkedin_reads_per_hour = max(1, min(payload.linkedin_reads_per_hour, 120))
 
     if payload.provider_keys:
         for name, value in payload.provider_keys.items():
@@ -184,3 +210,87 @@ async def set_api_key(payload: dict) -> dict:
     await settings_store.save(settings)
 
     return {"mode": "api_key", "connected": True}
+
+
+
+@router.get("/linkedin")
+async def linkedin_status() -> dict:
+    """The LinkedIn account connection, for the Settings page."""
+    cfg = await registry.build_config()
+    async with httpx.AsyncClient() as client:
+        return await linkedin_account.status(client, cfg)
+
+
+@router.post("/linkedin/connect")
+async def linkedin_connect() -> dict:
+    """Open the LinkedIn service's sign-in browser. The link appears in the
+    status a few seconds later; the operator signs in there, not here."""
+    try:
+        linkedin_account.request_login()
+    except (SourceError, OSError) as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    return {"login_state": "starting"}
+
+
+@router.post("/linkedin/test")
+async def linkedin_test() -> dict:
+    """Read the connected account's own profile once, to prove it works. Counts
+    as one of the day's LinkedIn reads."""
+    cfg = await registry.build_config()
+    try:
+        async with httpx.AsyncClient() as client:
+            who = await linkedin_account.test_connection(client, cfg)
+    except SourceError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    return {"signed_in": True, "account": who[:120]}
+
+
+@router.get("/usage")
+async def usage() -> dict:
+    """What personalization is consuming: the Claude plan's usage windows as
+    Claude Code last reported them, and the tokens this app has used."""
+    limits = await mongo.counters().find_one({"_id": "claude:limits"}) or {}
+    limits.pop("_id", None)
+
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+
+    def total(u: dict) -> int:
+        return sum(int(u.get(k) or 0) for k in _USAGE_FIELDS)
+
+    today = {"rows": 0, "tokens": 0}
+    week = {"rows": 0, "tokens": 0}
+    by_stage: dict[str, int] = {}
+    cursor = mongo.prospects().find(
+        {"personalization.generated_at": {"$ne": None}},
+        {"personalization.generated_at": 1, "personalization.usage": 1, "personalization.usage_by_stage": 1},
+    )
+    async for doc in cursor:
+        p = doc.get("personalization") or {}
+        try:
+            at = datetime.fromisoformat(str(p.get("generated_at")).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        if at < week_start:
+            continue
+        tokens = total(p.get("usage") or {})
+        week["rows"] += 1
+        week["tokens"] += tokens
+        for stage, stage_usage in (p.get("usage_by_stage") or {}).items():
+            by_stage[stage] = by_stage.get(stage, 0) + total(stage_usage)
+        if at >= day_start:
+            today["rows"] += 1
+            today["tokens"] += tokens
+
+    settings = await settings_store.load()
+    return {
+        "mode": settings.ai.mode.value,
+        "limits": limits or None,
+        "today": today,
+        "last_7_days": week,
+        "by_stage_7_days": by_stage,
+        "tokens_per_row": round(week["tokens"] / week["rows"]) if week["rows"] else None,
+    }

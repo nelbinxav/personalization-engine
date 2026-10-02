@@ -9,7 +9,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from app.ai.chain import ChainError, run_chain
+from app.ai.chain import ChainError, RateLimited, run_chain
 from app.ai.client import AuthUnavailable
 from app.api.deps import current_operator
 from app.core import settings_store
@@ -30,6 +30,7 @@ class PreviewRequest(BaseModel):
     # Unsaved drafts, keyed by stage number as a string: {"1": "...", "3": "..."}
     prompt_bodies: dict[str, str] = {}
     template_body: str | None = None
+    fallback_body: str | None = None
 
 
 @router.post("")
@@ -40,6 +41,8 @@ async def preview(payload: PreviewRequest) -> dict:
     template = await _pick_template(payload)
     if payload.template_body is not None:
         template = template.model_copy(update={"body": payload.template_body})
+    if payload.fallback_body is not None:
+        template = template.model_copy(update={"fallback_body": payload.fallback_body})
 
     prompts: dict[int, str] = {}
     for stage in (1, 2, 3):
@@ -66,6 +69,10 @@ async def preview(payload: PreviewRequest) -> dict:
         )
     except AuthUnavailable as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    except RateLimited as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, f"{exc} Try again in a minute."
+        ) from exc
     except ChainError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
@@ -81,7 +88,11 @@ async def preview(payload: PreviewRequest) -> dict:
         "dossier": personalization.dossier.model_dump() if personalization.dossier else None,
         "angles": [angle.model_dump() for angle in personalization.angles],
         "draft": personalization.draft.model_dump() if personalization.draft else None,
+        "fit_established": personalization.fit_established,
+        "fit_evidence": personalization.fit_evidence,
+        "ask_first": personalization.ask_first,
         "thin_context": output.thin_context,
+        "hold": output.hold,
         "reason": output.reason,
         "warnings": sorted(set(output.warnings)),
         "constraint_warning": personalization.constraint_warning,

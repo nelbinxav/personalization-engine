@@ -22,6 +22,10 @@ class Template(Doc):
     channel: Channel
     name: str
     body: str
+    # Approved copy for a row whose research does not show the prospect has the
+    # problem we solve: it asks instead of assuming. Empty means there is only
+    # one version of the copy. May carry a {{personalization}} slot of its own.
+    fallback_body: str = ""
     constraints: Constraints = Field(default_factory=Constraints)
     version: int = 1
     is_active: bool = False
@@ -31,6 +35,7 @@ class TemplateIn(BaseModel):
     channel: Channel
     name: str
     body: str
+    fallback_body: str = ""
     constraints: Constraints | None = None
     activate: bool = True
 
@@ -40,6 +45,7 @@ class TemplateOut(BaseModel):
     channel: Channel
     name: str
     body: str
+    fallback_body: str = ""
     constraints: Constraints
     version: int
     is_active: bool

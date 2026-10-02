@@ -1,14 +1,26 @@
 'use client'
 
-import { CheckCircle2, X, XCircle } from 'lucide-react'
+import { Bell, CheckCircle2, X, XCircle } from 'lucide-react'
+import Link from 'next/link'
 import { useEffect, useState } from 'react'
 
 /**
  * Minimal toast store. Confirmations ("Saved", "Job queued") used to render as
  * in-page alerts that never went away and pushed the layout down; a toast
  * says the same thing and gets out of the way.
+ *
+ * A notice is the exception: it reports something that happened while the
+ * operator was not looking (a job finished or paused), so it stays until
+ * dismissed and can carry a link to the next step.
  */
-type Toast = { id: number; tone: 'success' | 'error'; message: string }
+type Action = { href: string; label: string }
+type Toast = {
+  id: number
+  tone: 'success' | 'error' | 'notice'
+  message: string
+  title?: string
+  action?: Action
+}
 
 let nextId = 1
 let items: Toast[] = []
@@ -18,11 +30,11 @@ function emit() {
   for (const listener of listeners) listener(items)
 }
 
-function push(tone: Toast['tone'], message: string) {
+function push(tone: Toast['tone'], message: string, extra: Pick<Toast, 'title' | 'action'> = {}) {
   const id = nextId++
-  items = [...items, { id, tone, message }]
+  items = [...items, { id, tone, message, ...extra }]
   emit()
-  setTimeout(() => dismiss(id), tone === 'error' ? 7000 : 3500)
+  if (tone !== 'notice') setTimeout(() => dismiss(id), tone === 'error' ? 7000 : 3500)
 }
 
 function dismiss(id: number) {
@@ -33,6 +45,7 @@ function dismiss(id: number) {
 export const toast = {
   success: (message: string) => push('success', message),
   error: (message: string) => push('error', message),
+  notice: (title: string, message: string, action?: Action) => push('notice', message, { title, action }),
 }
 
 export function Toaster() {
@@ -57,10 +70,20 @@ export function Toaster() {
         >
           {t.tone === 'success' ? (
             <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" aria-hidden />
+          ) : t.tone === 'notice' ? (
+            <Bell className="mt-0.5 h-4 w-4 shrink-0 text-info" aria-hidden />
           ) : (
             <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-danger" aria-hidden />
           )}
-          <p className="flex-1 leading-relaxed">{t.message}</p>
+          <div className="flex-1 leading-relaxed">
+            {t.title && <p className="font-medium">{t.title}</p>}
+            <p className={t.title ? 'text-muted-foreground' : undefined}>{t.message}</p>
+            {t.action && (
+              <Link href={t.action.href} onClick={() => dismiss(t.id)} className="link mt-1 inline-block text-sm">
+                {t.action.label}
+              </Link>
+            )}
+          </div>
           <button
             onClick={() => dismiss(t.id)}
             className="rounded text-muted-foreground hover:text-foreground"

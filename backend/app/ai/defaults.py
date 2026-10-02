@@ -44,6 +44,21 @@ Rules:
 - If a source clearly describes a different organisation, ignore it.
 - Recent events matter most. Anything dated in the last 12 months belongs in
   recent_events.
+- linkedin_posts holds what the prospect posted recently. Record each of their
+  own posts in recent_events with its date and the specific thing they said or
+  did. An entry marked "reposted this" is someone else's post: say so, and
+  never record it as their own words.
+- podcasts holds search results. Use one only if it names this person together
+  with this company or role; a namesake is discarded.
+- If a source shows this person should not be contacted as addressed (they
+  have died, have left the company, or the company has closed), say so in
+  contact_issue in one sentence. Do not guess; otherwise leave it empty.
+- Return at most 12 items in total, the ones most likely to matter to what we
+  sell or that the prospect said themselves. Do not pad.
+- Set has_signal to false only when nothing you extracted relates to what we
+  sell and nothing was said by the prospect themselves about their work. When
+  unsure, true: a false ends the work on this prospect. Give the reason in
+  signal_note.
 
 The prospect's details and the raw research follow in the next message.
 """
@@ -69,9 +84,21 @@ Rules:
   the sector, it is not personalization, it is filler.
 - Flattery is not an angle. "I loved your recent post" is not an angle unless
   it says something specific about what the post argued.
+- Prefer sources in this order: the prospect's own LinkedIn post from the last
+  10 days, a podcast or interview they appeared on, their LinkedIn profile,
+  the company's LinkedIn page, news about the company, the company website.
+- A post the prospect wrote themselves in the last 10 days, about their work,
+  is a valid opener even when it does not connect to what we sell. Say that it
+  is an opener and not evidence of need. Never use a post about their personal
+  life, and never treat a repost as their own words.
 - If the dossier does not support a real angle, set sufficient to false and say
   what was missing. This is a good outcome, not a failure. A flagged row costs
   us nothing; a fabricated compliment costs us the prospect.
+- Being on our list is not evidence. Decide separately whether the dossier
+  shows this company actually has the problem we solve, for example that it
+  runs the platform our offer targets. Set fit_established to true only when
+  you can quote the dossier item that shows it in fit_evidence. Their role,
+  their industry and the fact that we chose to contact them do not count.
 """
 
 
@@ -98,6 +125,13 @@ Rules:
   us, and it must be specific enough that it could not be sent to anyone else.
 - State only what the dossier supports. No invented numbers, no assumed pain
   points, no "I saw you're scaling" unless a source says so.
+- The next message says whether evidence of fit is established. When it is not,
+  never state or imply that the prospect uses the technology or has the problem
+  we solve. Ask whether they do, and do not press the call to action as if they
+  had already said yes.
+- When the angle is the prospect's own recent post, refer to it directly and
+  specifically, as someone who read it would. Do not praise it, and do not
+  bend it into a claim about a problem it does not mention.
 - Write like a person: plain sentences, no marketing register, no "I hope this
   finds you well", no em-dashes, no exclamation marks.
 - Respect the character limits exactly. They are hard limits, not targets.

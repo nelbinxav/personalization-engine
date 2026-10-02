@@ -28,6 +28,16 @@ class SourceError(Exception):
     """A source failed in a way worth reporting on the row."""
 
 
+class SourceRateLimited(SourceError):
+    """The provider told us to slow down, after our own retries. The row is
+    worth trying again later, unlike a failure that will repeat."""
+
+
+class SourceDailyLimit(SourceError):
+    """Our own daily cap for a provider is spent. Nothing will work until
+    tomorrow, so the job waits rather than retrying."""
+
+
 class SkipSource(Exception):
     """This prospect has nothing for this source to work with (e.g. no website).
 
@@ -42,6 +52,13 @@ class SourceConfig:
     timeout: float = DEFAULT_TIMEOUT
     cache_ttl_hours: int = 24 * 7
     linkedin_provider: str = "apify"
+    # The `account` LinkedIn provider: where its browser service listens, and
+    # how many LinkedIn page reads a day we allow ourselves on that account.
+    linkedin_mcp_url: str = "http://linkedin:8080/mcp"
+    linkedin_daily_limit: int = 150
+    linkedin_reads_per_hour: int = 20
+    # A post older than this is not "recent" enough to open a message with.
+    recent_post_days: int = 10
     max_content_chars: int = MAX_CONTENT_CHARS
 
     def key(self, name: str) -> str | None:

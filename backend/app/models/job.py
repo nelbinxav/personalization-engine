@@ -20,6 +20,10 @@ class JobStatus(str, Enum):
     # Claude credential died mid-run. Rows keep their progress; re-connecting
     # and resuming picks up where it stopped instead of restarting.
     blocked_auth = "blocked_auth"
+    # Claude asked us to wait (a plan usage window, or repeated rate limits).
+    # Unlike blocked_auth nobody has to do anything: the worker re-queues the
+    # unfinished rows by itself once `resume_at` passes.
+    rate_limited = "rate_limited"
 
 
 class JobCounts(BaseModel):
@@ -53,8 +57,14 @@ class Job(Doc):
     options: JobOptions = Field(default_factory=JobOptions)
     error: str | None = None
     cost_usd: float = 0.0
+    # All tokens the job's rows used, whatever the credential mode.
+    tokens: int = 0
+    # Each time the job paused for a limit: when, why, and when it resumed.
+    limit_events: list[dict] = Field(default_factory=list)
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    # Only set while status is rate_limited.
+    resume_at: datetime | None = None
 
 
 class CreateJobRequest(BaseModel):
@@ -76,3 +86,6 @@ class JobOut(BaseModel):
     created_at: object
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    resume_at: datetime | None = None
+    tokens: int = 0
+    limit_events: list[dict] = Field(default_factory=list)

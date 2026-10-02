@@ -25,12 +25,14 @@ import {
   Stepper,
   cn,
 } from '@/components/ui'
+import { UsagePanel } from '@/components/usage-panel'
 import { api } from '@/lib/api'
 import type { Job, Upload } from '@/lib/types'
 import {
   NEXT_ACTION_LABEL,
   PHASE_LABEL,
   isActive,
+  isLive,
   nextAction,
   timeAgo,
   uploadSteps,
@@ -67,11 +69,13 @@ export default function OverviewPage() {
   }, [refresh])
 
   const running = jobs.filter(isActive)
+  // Waiting jobs restart by themselves, so keep polling for them too.
+  const live = jobs.filter(isLive).length
   useEffect(() => {
-    if (!running.length) return
+    if (!live) return
     const timer = setInterval(refresh, 4000)
     return () => clearInterval(timer)
-  }, [running.length, refresh])
+  }, [live, refresh])
 
   const done = readiness.checks.filter((c) => c.ok).length
   const setupComplete = !readiness.loading && done === readiness.checks.length
@@ -126,6 +130,8 @@ export default function OverviewPage() {
           </ul>
         </Card>
       )}
+
+      <UsagePanel />
 
       {uploads?.length === 0 && (
         <section className="mb-8">

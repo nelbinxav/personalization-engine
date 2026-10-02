@@ -419,11 +419,13 @@ export function statusTone(status: string): Tone {
       return 'success'
     case 'running':
     case 'queued':
+    // Waiting for a limit is still in progress: it restarts by itself.
+    case 'rate_limited':
       return 'info'
     case 'failed':
       return 'danger'
     case 'blocked_auth':
-    case 'thin_context':
+    case 'needs_review':
       return 'warning'
     default:
       return 'neutral'
@@ -439,7 +441,9 @@ const STATUS_LABELS: Record<string, string> = {
   skipped: 'Skipped',
   cancelled: 'Cancelled',
   blocked_auth: 'Paused',
-  thin_context: 'Needs review',
+  rate_limited: 'Waiting for limit',
+  thin_context: 'Generic message',
+  needs_review: 'Hold',
 }
 
 export function statusLabel(status: string): string {

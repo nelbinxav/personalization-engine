@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 
+import { requestNotifications } from '@/components/job-watcher'
 import {
   Alert,
   Button,
@@ -21,7 +22,10 @@ import { CHANNELS, type Readiness } from '@/lib/workflow'
 
 const LIMITS = [
   { value: '3', label: 'Trial · 3' },
+  { value: '10', label: '10' },
   { value: '25', label: '25' },
+  // About a day of LinkedIn reads at the default daily limit.
+  { value: '75', label: '75' },
   { value: '100', label: '100' },
   { value: 'all', label: 'All' },
 ] as const
@@ -87,6 +91,8 @@ export function LaunchJob({
 
   async function launch() {
     setBusy(true)
+    // Asked here because it needs a click, and this is the moment it matters.
+    requestNotifications()
     try {
       const job = await api.post<Job>('/jobs', {
         upload_id: upload.id,

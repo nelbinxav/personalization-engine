@@ -24,11 +24,18 @@ import {
 } from '@/components/ui'
 import { api, exportUrl } from '@/lib/api'
 import type { Job, ProspectRow } from '@/lib/types'
-import { PHASE_LABEL, duration, isActive, money, timeAgo } from '@/lib/workflow'
+import { PHASE_LABEL, clockTime, duration, isActive, isLive, isWaiting, money, timeAgo } from '@/lib/workflow'
 
 // The rows endpoint pages at 50 by default; without paging here, rows 51+ of
 // a large sheet were simply invisible.
 const PAGE_SIZE = 50
+
+// What to do with a personalized row. Mirrors `outreach_of` in the backend.
+const OUTREACH = {
+  personalised: { label: 'Personalised', tone: 'success', title: 'A line was written for this lead. Ready to send.' },
+  generic: { label: 'Generic message', tone: 'neutral', title: 'No personal line, but your approved copy is there. Fine to send.' },
+  hold: { label: 'Hold: check first', tone: 'warning', title: 'Do not send until someone has read the reason.' },
+} as const
 
 function prospectName(row: ProspectRow) {
   return (
@@ -77,11 +84,14 @@ export default function JobDetailPage() {
   }, [])
 
   const active = job ? isActive(job) : false
+  const waiting = job ? isWaiting(job) : false
+  // Keep polling while waiting too, so the page picks up the automatic restart.
+  const live = job ? isLive(job) : false
   useEffect(() => {
-    if (!active) return
+    if (!live) return
     const timer = setInterval(refresh, 3000)
     return () => clearInterval(timer)
-  }, [active, refresh])
+  }, [live, refresh])
 
   async function retry(row: ProspectRow) {
     try {
@@ -141,14 +151,14 @@ export default function JobDetailPage() {
         description={`Started ${timeAgo(job.created_at)}${job.options.limit ? ` · first ${job.options.limit} rows` : ''}${job.options.force ? ' · redo' : ''}`}
         action={
           <>
-            {active && (
+            {live && (
               <Button variant="outline" onClick={() => act('cancel')}>
                 Cancel
               </Button>
             )}
-            {(job.status === 'blocked_auth' || job.status === 'cancelled') && (
-              <Button icon={RotateCcw} onClick={() => act('resume')}>
-                Resume
+            {(job.status === 'blocked_auth' || job.status === 'cancelled' || waiting) && (
+              <Button icon={RotateCcw} variant={waiting ? 'outline' : 'primary'} onClick={() => act('resume')}>
+                {waiting ? 'Resume now' : 'Resume'}
               </Button>
             )}
           </>
@@ -165,17 +175,44 @@ export default function JobDetailPage() {
         <Stat label="Failed" value={job.counts.failed} tone={job.counts.failed ? 'danger' : undefined} />
         <Stat label="Skipped" value={job.counts.skipped} hint={isScrape ? 'Nothing to fetch' : undefined} />
         <Stat
-          label={isScrape ? 'Time' : 'Cost'}
+          label={isScrape ? 'Time' : job.cost_usd || !job.tokens ? 'Cost' : 'Tokens'}
           value={
             isScrape
               ? (job.finished_at || active ? duration(job.started_at, job.finished_at) : null) ?? '—'
-              : money(job.cost_usd, 4)
+              : job.cost_usd
+                ? money(job.cost_usd, 4)
+                : job.tokens
+                  ? `${Math.round(job.tokens / 1000)}k`
+                  : '—'
           }
-          hint={!isScrape && job.finished_at ? `in ${duration(job.started_at, job.finished_at)}` : undefined}
+          hint={
+            !isScrape
+              ? [
+                  !job.cost_usd && job.tokens ? 'on your Claude plan' : null,
+                  job.finished_at ? `in ${duration(job.started_at, job.finished_at)}` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ') || undefined
+              : undefined
+          }
         />
       </div>
 
-      {job.error && (
+      {waiting && (
+        <Alert tone="info" className="mb-6" title={`Waiting for a limit to reset, resumes ${clockTime(job.resume_at)}`}>
+          {job.error} Nothing to do: the job restarts by itself and picks up only the rows that have not run. Finished
+          rows kept their results.
+        </Alert>
+      )}
+
+      {job.limit_events?.length > 0 && !waiting && (
+        <p className="mb-6 text-xs text-muted-foreground">
+          Paused for a limit {job.limit_events.length} time{job.limit_events.length === 1 ? '' : 's'}, last{' '}
+          {timeAgo(job.limit_events[job.limit_events.length - 1].at)}, and carried on by itself.
+        </p>
+      )}
+
+      {job.error && !waiting && (
         <Alert
           tone="warning"
           className="mb-6"
@@ -212,7 +249,7 @@ export default function JobDetailPage() {
         >
           {isScrape
             ? 'Spot-check a few rows below, then write messages from this research.'
-            : 'Read a few below. Rows marked “Needs review” had too little research to personalize honestly.'}
+            : 'Personalised rows have a line written for that lead. Generic rows carry your approved copy with no personal line, and are fine to send. Hold rows should not go out until someone has read the reason next to them.'}
         </Alert>
       )}
 
@@ -227,8 +264,13 @@ export default function JobDetailPage() {
           }}
           options={[
             { value: '', label: 'All' },
-            { value: 'done', label: 'Done' },
-            ...(!isScrape ? [{ value: 'thin_context', label: 'Needs review' }] : []),
+            { value: 'done', label: isScrape ? 'Done' : 'Personalised' },
+            ...(!isScrape
+              ? [
+                  { value: 'thin_context', label: 'Generic' },
+                  { value: 'needs_review', label: 'Hold' },
+                ]
+              : []),
             { value: 'failed', label: 'Failed' },
             { value: 'skipped', label: 'Skipped' },
             { value: 'pending', label: 'Not run' },
@@ -328,7 +370,13 @@ export default function JobDetailPage() {
                     </td>
 
                     <td>
-                      <StatusBadge status={status} />
+                      {!isScrape && row.outreach ? (
+                        <Badge tone={OUTREACH[row.outreach].tone} dot title={OUTREACH[row.outreach].title}>
+                          {OUTREACH[row.outreach].label}
+                        </Badge>
+                      ) : (
+                        <StatusBadge status={status} />
+                      )}
                       {rowError && <div className="mt-1.5 max-w-64 text-xs text-muted-foreground">{rowError}</div>}
                     </td>
 

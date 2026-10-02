@@ -62,3 +62,7 @@ def source_cache():
 
 def staging():
     return get_db()["staging"]
+
+
+def counters():
+    return get_db()["counters"]

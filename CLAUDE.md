@@ -56,6 +56,30 @@ One arq job **per row**, never per upload. That is what gives free per-row
 retry and stops a 500-row sheet dying at row 498. Progress is tracked by atomic
 `$inc` on the parent job doc in `app/worker/bookkeeping.py`.
 
+### Unattended runs (`app/worker/`)
+
+A job must finish with nobody watching, so every path out of a row task leaves
+the row counted or back in the queue.
+
+- **arq only retries on `Retry`.** A plain exception fails the arq job and
+  strands the row at "running" with a job that never closes. Rate limits
+  (`chain.RateLimited`, a source result with `meta.rate_limited`) therefore
+  raise `Retry` with a growing delay; anything unexpected is caught and marks
+  the row failed.
+- **A limit pauses the job, and the worker restarts it.** A spent plan window
+  (`UsageLimitReached`) or a row still rate-limited on its last try sets the
+  job to `rate_limited` with a `resume_at`. The `resume_due_jobs` cron re-queues
+  the unfinished rows when that time passes. `blocked_auth` is different: a
+  credential problem needs a person, so it never resumes by itself.
+- **Rows are queued under a fixed arq id** (`bookkeeping.enqueue_row`) and
+  claimed before they run (`claim_row`), so resuming a job whose old tasks have
+  not drained cannot run or count a row twice. This relies on `keep_result = 0`.
+- **Concurrency is the Settings value**, enforced in `limiter.py` and re-read
+  while jobs run. arq's `max_jobs` is only the ceiling.
+
+The frontend's `JobWatcher` (in the app layout) raises a notice, and a browser
+notification when allowed, as jobs finish or pause.
+
 ### The three-stage chain (`app/ai/chain.py`)
 
 1. **Dossier** - raw scraped text to structured facts, each tagged with its source.
@@ -99,6 +123,17 @@ citation guard, and the row stays flagged. If the active stage-3 prompt
 never places `{{template}}`, the chain appends the template and constraints to
 it so the model never writes blind.
 
+**Ask first, do not assume.** Being on the list is not evidence that a prospect
+has the problem we solve (for the Databricks campaign: that they run
+Databricks). Stage 2 returns `fit_established` with the dossier item that shows
+it; without that item it counts as false. A template can carry a second piece
+of approved copy, `fallback_body` ("Ask-first copy"), which asks whether they
+have the problem instead of assuming it and pushing the call to action.
+`copy_for()` gives that copy to every row where fit was not established,
+including `thin_context` rows, and the export's `copy_used` and `fit_evidence`
+columns say which a row got and why. Keep assumptions out of the ask-first
+copy; that is its whole purpose.
+
 ### Subscription mode (`claude_code`)
 
 The third credential mode runs each stage through the operator's own Claude
@@ -109,8 +144,9 @@ credential lives in the `claude_code_profile` volume and the app never reads
 it. **Do not replace this with an in-app Claude.ai OAuth flow or read the stored
 token** - Anthropic forbids third-party apps from holding subscription
 credentials, and running the unmodified binary is what keeps this permitted.
-A plan usage limit raises `UsageLimitReached` and parks the job like an auth
-failure, but its message says "wait", not "reconnect".
+A plan usage limit raises `UsageLimitReached`, which pauses the job until the
+reset time Claude Code reported (`parse_reset_time`; every 30 minutes when it
+did not say) and then restarts it. Its message says "wait", not "reconnect".
 
 ### Layout
 
@@ -118,15 +154,19 @@ failure, but its message says "wait", not "reconnect".
 backend/app/
   api/v1/endpoints/   auth uploads jobs prompts templates preview settings exports
   ingest/             csv_loader, gsheet_loader, mapping (column auto-detection)
-  sources/            base (the Source protocol), website, rss, news, linkedin, registry
-  ai/                 client (credentials/OAuth), chain, schemas, defaults, pricing
-  worker/             main (arq WorkerSettings), tasks, bookkeeping
+  sources/            base (the Source protocol), website, rss, news, exa (search, podcasts),
+                      linkedin, linkedin_account, mcp_http, registry
+  ai/                 client (credentials/OAuth), chain, claude_code, openai_stage,
+                      schemas, defaults, pricing
+  worker/             main (arq WorkerSettings), tasks, bookkeeping, limiter
   export/             csv_writer (streaming)
 frontend/app/(app)/   overview, uploads, uploads/[id], uploads/new, jobs, jobs/[id],
                       prompts, templates, settings
-frontend/components/  ui/ (design system + toast), launch-job (shared job launcher)
+frontend/components/  ui/ (design system + toast), launch-job (shared job launcher),
+                      job-watcher (finish/pause notifications)
 frontend/lib/         api, types, workflow (next-step logic, readiness checks, formatting)
-deploy/               TAILSCALE.md (private hosting guide), backup.sh
+deploy/               TAILSCALE.md (hosting guide), LINKEDIN.md (LinkedIn account setup),
+                      backup.sh
 ```
 
 ### Frontend workflow
@@ -169,12 +209,57 @@ the settings UI, job launcher and CSV exporter all read that registry. Raise
 `SkipSource` when the prospect lacks the input (an absence, not a failure) and
 `SourceError` when the fetch genuinely failed.
 
+### Source priority
+
+`registry.ALL_SOURCES` is in priority order, and that order is the product
+decision: the prospect's own LinkedIn post from the last 10 days, then podcasts
+and interviews, their LinkedIn profile, the company's LinkedIn page, news, and
+last the company website and RSS. `chain.format_research` shows research to the
+model in that order and the stage-2 prompt ranks angles by it. A recent post by
+the prospect about their work is a valid opener even with no link to the offer;
+whether they have the problem is decided separately (`fit_established`).
+
+What the model reads is trimmed, not what is stored: `format_research` strips
+link targets and images and caps each source at `ai.research_chars_per_source`
+(6000; recent posts are exempt), while the row and the export keep the full
+text. A row with no usable research skips Claude entirely. Measured on 10 rows
+with thinking effort low/medium/medium: about 30,000 tokens a row down to about
+20,000.
+
+Stage 1 also returns `has_signal`: when it found nothing related to the offer
+and nothing the prospect said themselves, stage 2 is skipped and the row is
+`thin_context` with stage 1's reason. Stage 1 dominates a row's tokens (about
+two thirds, measured per stage in `personalization.usage_by_stage`), because it
+is the one that reads the research. Stage 2 always receives the Settings offer
+text: it is appended when the prompt does not place `{{offer_context}}`.
+
+Podcasts and the news fallback use Exa's hosted MCP search, which needs no key
+(`app/sources/exa.py`, through the small MCP client in `mcp_http.py`).
+
 ### LinkedIn provider
 
 Proxycurl was sued by LinkedIn in Jan 2026 and shut down 4 Jul 2026. Treat the
 vendor as a moving part. `app/sources/linkedin.py` is the only file that knows
-which one is in use; `settings.linkedin_provider` selects it. Only Apify is
-implemented.
+which one is in use; `settings.linkedin_provider` selects it. Two are
+implemented:
+
+- `apify`: profiles and company pages, no account, cannot read posts.
+- `account`: a signed-in LinkedIn account driven by the `linkedin` compose
+  service (linkedin-mcp-server, the Agent Reach route; `linkedin_account.py`,
+  `deploy/LINKEDIN.md`). The only way to get recent posts. Automated access
+  breaks LinkedIn's terms and can get the account restricted, so reads are
+  serialized, spread at an hourly rate (`settings.linkedin_reads_per_hour`,
+  default 20, with a randomised gap) and capped per day
+  (`settings.linkedin_daily_limit`). Rows that use it take `limiter.linkedin_row`
+  before a row slot, so their queue does not starve other rows, which is also
+  why arq's `max_jobs` is far above the concurrency cap. A spent cap pauses the
+  scrape job until
+  the next day. The account is connected from Settings: the api drops a flag
+  in the shared `linkedin_control` volume and `deploy/linkedin-run.sh` (the
+  service's entrypoint) swaps the server for its login browser, then back.
+  **Do not remove or loosen that pacing to speed a job up.** The
+  service returns raw page text, so the 10-day filter reads LinkedIn's own age
+  stamps (`split_posts`); if LinkedIn changes them, that is the function to fix.
 
 ## Conventions
 
@@ -185,11 +270,19 @@ implemented.
 - Collection access goes through `app/db/mongo.py` accessors, never raw names.
 - `prospects.raw` is the original sheet row, untouched, so exports always
   reproduce the source columns first and in order.
-- Model defaults to `claude-opus-5` with adaptive thinking. No `budget_tokens`,
-  no assistant prefill, no `temperature` - all three 400 on Opus 5.
+- Model defaults to `claude-sonnet-5-5` with adaptive thinking. No
+  `budget_tokens`, no assistant prefill, no `temperature`, no
+  `thinking: disabled` and no forced `tool_choice` - each is a 400 on it.
+- Each stage can run on its own model (`ai.stage_models`, set in Settings).
+  A `gpt-` model goes through `app/ai/openai_stage.py` (OpenAI Responses API,
+  same strict schema) and is always billed to the OpenAI key in Settings, even
+  when Claude runs on the subscription. The intended split is a cheap model
+  for stage 1, which reads the most and judges the least, and Claude for the
+  angle and the message.
 
 ## Tests
 
 `cd backend && pytest`. Covers column mapping, CSV parsing, chain rendering and
-constraint checks, and CSV export shaping - the places where a silent bug
+constraint checks, copy selection, limit-reset parsing, retry pacing, the
+concurrency limiter and CSV export shaping - the places where a silent bug
 corrupts output. There is no coverage of the network paths (scrapers, Claude).

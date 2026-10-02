@@ -25,6 +25,7 @@ import {
   FIELD_META,
   PHASE_LABEL,
   isActive,
+  isLive,
   money,
   nextAction,
   timeAgo,
@@ -67,11 +68,13 @@ function UploadInner() {
   }, [refresh])
 
   const running = jobs.filter(isActive)
+  // Waiting jobs restart by themselves, so keep polling for them too.
+  const live = jobs.filter(isLive).length
   useEffect(() => {
-    if (!running.length) return
+    if (!live) return
     const timer = setInterval(refresh, 3000)
     return () => clearInterval(timer)
-  }, [running.length, refresh])
+  }, [live, refresh])
 
   // Preselect whichever phase the upload needs next.
   useEffect(() => {

@@ -9,13 +9,16 @@ scraping, so treat the vendor here as a moving part, not a fixture.
 The provider is therefore pluggable via `settings.linkedin_provider`:
 
   apify       (default) -- marketplace actors, pay per result
+  account               -- a signed-in LinkedIn account driven through a browser
+                           (the Agent Reach route, see linkedin_account.py). The
+                           only one that can read recent posts. Trades legal
+                           exposure for account-restriction risk.
   brightdata            -- dataset API
   scrapin               -- closest drop-in to the old Proxycurl shape
-  unipile               -- account-based; uses YOUR LinkedIn session, which
-                           trades legal exposure for account-ban risk
+  unipile               -- account-based, hosted
 
-Only Apify is implemented. Adding another is a `_fetch_<provider>` function
-plus a branch in `_dispatch` -- nothing outside this file changes.
+Apify and account are implemented. Adding another is a branch in each source's
+`fetch` -- nothing outside this file changes.
 """
 import asyncio
 import logging
@@ -24,9 +27,11 @@ import httpx
 
 from app.models.common import Identity
 from app.models.prospect import SourceResult
+from app.sources import linkedin_account
 from app.sources.base import (
     SourceConfig,
     SourceError,
+    SourceRateLimited,
     SkipSource,
     failed,
     normalize_url,
@@ -62,6 +67,8 @@ async def _apify_run(
         raise SourceError("Apify rejected the token (401). Check it in Settings.")
     if start.status_code == 404:
         raise SourceError(f"Apify actor '{actor}' not found. It may have been renamed or removed.")
+    if start.status_code == 429:
+        raise SourceRateLimited("Apify rate limit hit.")
     if start.status_code >= 400:
         raise SourceError(f"Apify returned HTTP {start.status_code}: {start.text[:200]}")
 
@@ -151,6 +158,70 @@ def _render_company(item: dict) -> str:
     return "\n\n".join(parts)
 
 
+class LinkedInPostsSource:
+    """What the prospect posted on LinkedIn in the last few days.
+
+    The strongest opener there is, and the reason the `account` provider
+    exists: posts sit behind LinkedIn's login.
+    """
+
+    key = "linkedin_posts"
+    label = "Recent LinkedIn posts"
+    # Recency is the point, so do not serve a week-old answer from the cache.
+    cache_ttl_hours = 24
+
+    def target(self, identity: Identity) -> str | None:
+        return normalize_url(identity.linkedin_url)
+
+    async def fetch(
+        self, identity: Identity, cfg: SourceConfig, client: httpx.AsyncClient
+    ) -> SourceResult:
+        url = self.target(identity)
+        if not url:
+            raise SkipSource("No LinkedIn profile URL on this row")
+
+        if cfg.linkedin_provider != "account":
+            raise SourceError(
+                "Recent posts need the LinkedIn account provider: posts are only visible to a "
+                "signed-in account. Choose it under LinkedIn provider in Settings."
+            )
+
+        data = await linkedin_account.person(client, cfg, url)
+        raw = linkedin_account.sections_of(data).get("posts", "")
+        if not raw.strip():
+            problem = linkedin_account.section_error(data, "posts")
+            return failed(
+                self.key,
+                f"Could not read posts: {problem}" if problem else "No posts on this profile",
+                url=url,
+            )
+
+        recent, found = linkedin_account.recent_posts(raw, cfg.recent_post_days)
+        if not found:
+            # LinkedIn changed how it stamps post ages. Pass the text through
+            # with the rule spelled out rather than drop a usable source.
+            body = (
+                "LinkedIn activity for this person. The age of each post could not be read, so "
+                f"treat a post as recent only if its own text shows it is from the last "
+                f"{cfg.recent_post_days} days.\n\n{raw.strip()}"
+            )
+            return ok(self.key, body, cfg, url=url, via="account", ages_parsed=False)
+        if not recent:
+            return failed(
+                self.key, f"No LinkedIn posts in the last {cfg.recent_post_days} days", url=url
+            )
+
+        owner = identity.display_name
+        return ok(
+            self.key,
+            linkedin_account.render_posts(recent, owner),
+            cfg,
+            url=url,
+            via="account",
+            post_count=len(recent),
+        )
+
+
 class LinkedInProfileSource:
     key = "linkedin_profile"
     label = "LinkedIn profile"
@@ -164,6 +235,19 @@ class LinkedInProfileSource:
         url = self.target(identity)
         if not url:
             raise SkipSource("No LinkedIn profile URL on this row")
+
+        if cfg.linkedin_provider == "account":
+            data = await linkedin_account.person(client, cfg, url)
+            sections = linkedin_account.sections_of(data)
+            # Posts have their own source, with the recency rule applied.
+            body = "\n\n".join(
+                f"## {name.replace('_', ' ')}\n{text.strip()}"
+                for name, text in sections.items()
+                if name != "posts" and text.strip()
+            )
+            if not body:
+                return failed(self.key, "LinkedIn returned an empty profile (it may be private)", url=url)
+            return ok(self.key, body, cfg, url=url, via="account")
 
         if cfg.linkedin_provider != "apify":
             raise SourceError(
@@ -195,6 +279,23 @@ class LinkedInCompanySource:
         url = self.target(identity)
         if not url:
             raise SkipSource("No LinkedIn company URL on this row")
+
+        if cfg.linkedin_provider == "account":
+            data = await linkedin_account.company(client, cfg, url)
+            sections = linkedin_account.sections_of(data)
+            parts = [
+                f"## {name.replace('_', ' ')}\n{text.strip()}"
+                for name, text in sections.items()
+                if name != "posts" and text.strip()
+            ]
+            recent, _ = linkedin_account.recent_posts(sections.get("posts", ""), cfg.recent_post_days)
+            if recent:
+                parts.append(
+                    linkedin_account.render_posts(recent, identity.company or "the company")
+                )
+            if not parts:
+                return failed(self.key, "LinkedIn returned an empty company page", url=url)
+            return ok(self.key, "\n\n".join(parts), cfg, url=url, via="account")
 
         if cfg.linkedin_provider != "apify":
             raise SourceError(
