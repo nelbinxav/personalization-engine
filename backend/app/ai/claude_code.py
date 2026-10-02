@@ -24,11 +24,15 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.ai.client import AuthUnavailable
+from app.db import mongo
 from app.models.prospect import Usage
 
 logger = logging.getLogger(__name__)
@@ -50,10 +54,68 @@ class ClaudeCodeError(Exception):
 class UsageLimitReached(AuthUnavailable):
     """The subscription's usage window is exhausted.
 
-    A subclass of AuthUnavailable only so the worker parks the job instead of
-    failing every remaining row. It is NOT a credential problem -- waiting fixes
-    it, reconnecting does not -- and the message says so.
+    A subclass of AuthUnavailable only so callers that do not care about the
+    difference still stop instead of failing rows. It is NOT a credential
+    problem -- waiting fixes it, reconnecting does not -- and the message says
+    so. `resume_at` is when Claude Code said the limit resets, when it said.
     """
+
+    def __init__(self, message: str, resume_at: datetime | None = None) -> None:
+        super().__init__(message)
+        self.resume_at = resume_at
+
+
+# "Claude AI usage limit reached|1759000000"
+_RESET_EPOCH = re.compile(r"\|(\d{10}|\d{13})\b")
+# "resets 3pm", "resets at 3:30pm (America/New_York)", "reset at 15:00 (UTC)"
+_RESET_CLOCK = re.compile(
+    r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([\w/+-]+)\))?",
+    re.IGNORECASE,
+)
+# A reset further out than this is a misread, not a usage window.
+_MAX_RESET_AHEAD = timedelta(days=8)
+
+
+def parse_reset_time(message: str, now: datetime | None = None) -> datetime | None:
+    """Pull the limit's reset time out of Claude Code's message, as UTC.
+
+    The wording has changed between releases, so this recognises the forms seen
+    so far and returns None for anything else; the caller then probes on a
+    fixed interval instead of trusting a guess.
+    """
+    now = now or datetime.now(timezone.utc)
+
+    epoch = _RESET_EPOCH.search(message)
+    if epoch:
+        seconds = int(epoch.group(1))
+        if seconds > 10**12:
+            seconds //= 1000
+        when = datetime.fromtimestamp(seconds, timezone.utc)
+        return when if now < when <= now + _MAX_RESET_AHEAD else None
+
+    clock = _RESET_CLOCK.search(message)
+    if not clock:
+        return None
+    hour, minute, meridiem, zone = clock.groups()
+    hour, minute = int(hour), int(minute or 0)
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if meridiem.lower() == "pm" else 0)
+    if hour > 23 or minute > 59:
+        return None
+
+    tz = datetime.now().astimezone().tzinfo
+    if zone:
+        try:
+            tz = ZoneInfo(zone)
+        except (ZoneInfoNotFoundError, ValueError):
+            return None
+    local_now = now.astimezone(tz)
+    when = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if when <= local_now:
+        when += timedelta(days=1)
+    return when.astimezone(timezone.utc)
 
 
 @dataclass
@@ -133,12 +195,22 @@ async def status() -> CodeStatus:
     )
 
 
+def _attach_reset(failure: Exception, limits: dict | None) -> None:
+    """When the message did not say when the limit resets, the limit event does."""
+    if isinstance(failure, UsageLimitReached) and failure.resume_at is None and limits:
+        resets = limits.get("resetsAt")
+        if resets:
+            failure.resume_at = datetime.fromtimestamp(resets, timezone.utc)
+
+
 def _classify_failure(message: str) -> Exception:
     lowered = message.lower()
     if any(marker in lowered for marker in _LIMIT_MARKERS):
         return UsageLimitReached(
             f"Your Claude plan's usage limit was reached ({message.strip()[:200]}). "
-            "Waiting fixes this, reconnecting does not: resume the job once the limit resets."
+            "Waiting fixes this, reconnecting does not. Jobs resume by themselves once "
+            "the limit resets.",
+            resume_at=parse_reset_time(message),
         )
     if any(marker in lowered for marker in _AUTH_MARKERS):
         return AuthUnavailable(
@@ -148,18 +220,72 @@ def _classify_failure(message: str) -> Exception:
     return ClaudeCodeError(f"Claude Code failed: {message.strip()[:400]}")
 
 
+def split_stream(out: str) -> tuple[dict | None, dict | None]:
+    """(final result, plan-limit info) from Claude Code's output.
+
+    With `--output-format stream-json` the output is one JSON event per line:
+    the `result` event is what `--output-format json` would have printed, and a
+    `rate_limit_event` says how much of the plan's usage windows is spent. A
+    single JSON object (the older format) is accepted too.
+    """
+    try:
+        whole = json.loads(out)
+        if isinstance(whole, dict):
+            return whole, None
+    except json.JSONDecodeError:
+        pass
+
+    result: dict | None = None
+    limits: dict | None = None
+    for line in out.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "result":
+            result = event
+        elif event.get("type") == "rate_limit_event":
+            limits = event.get("rate_limit_info") or limits
+    return result, limits
+
+
+def limits_summary(info: dict) -> dict:
+    """The plan-limit event reduced to what the app shows and stores."""
+    windows = {}
+    for name, window in (info.get("unifiedWindows") or {}).items():
+        resets = window.get("resetsAt")
+        windows[name] = {
+            "utilization": window.get("utilization"),
+            "resets_at": datetime.fromtimestamp(resets, timezone.utc) if resets else None,
+        }
+    resets = info.get("resetsAt")
+    return {
+        "status": info.get("status"),
+        "limit_type": info.get("rateLimitType"),
+        "resets_at": datetime.fromtimestamp(resets, timezone.utc) if resets else None,
+        "windows": windows,
+        "checked_at": datetime.now(timezone.utc),
+    }
+
+
 def parse_result(out: str, err: str, returncode: int) -> tuple[dict, Usage]:
-    """Turn `claude -p --output-format json` output into (parsed, usage).
+    """Turn `claude -p` output into (parsed, usage).
 
     Pulled out of `run_stage` so the parsing is testable without the binary.
     """
-    try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        raise _classify_failure(err or out or f"exit code {returncode}")
+    data, limits = split_stream(out)
+    if data is None:
+        failure = _classify_failure(err or out or f"exit code {returncode}")
+        _attach_reset(failure, limits)
+        raise failure
 
     if data.get("is_error") or data.get("subtype") != "success":
-        raise _classify_failure(str(data.get("result") or data.get("subtype") or err))
+        failure = _classify_failure(str(data.get("result") or data.get("subtype") or err))
+        _attach_reset(failure, limits)
+        raise failure
 
     parsed = data.get("structured_output")
     if parsed is None:
@@ -194,7 +320,10 @@ async def run_stage(
 
     args = [
         "-p",
-        "--output-format", "json",
+        # stream-json rather than json: same result, plus the event that says
+        # how much of the plan's usage windows is spent.
+        "--output-format", "stream-json",
+        "--verbose",
         "--json-schema", json.dumps(schema),
         "--system-prompt", system_text,
         "--model", model,
@@ -206,4 +335,17 @@ async def run_stage(
         "--no-session-persistence",
     ]
     returncode, out, err = await _exec(args, user_text.encode("utf-8"), timeout=_STAGE_TIMEOUT)
+    _, limits = split_stream(out)
+    if limits:
+        await _remember_limits(limits)
     return parse_result(out, err, returncode)
+
+
+async def _remember_limits(info: dict) -> None:
+    """Keep the latest plan-limit reading for the app to show. Never fatal."""
+    try:
+        await mongo.counters().update_one(
+            {"_id": "claude:limits"}, {"$set": limits_summary(info)}, upsert=True
+        )
+    except Exception:  # noqa: BLE001 - a status display must not fail a row
+        logger.debug("Could not store plan limits", exc_info=True)

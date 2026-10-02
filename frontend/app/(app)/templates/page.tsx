@@ -22,7 +22,7 @@ import type { Channel, Template } from '@/lib/types'
 import { CHANNELS, timeAgo } from '@/lib/workflow'
 
 const SUGGESTED_MAX: Record<Channel, string> = { linkedin: '300', email: '', whatsapp: '' }
-const TOKENS = ['{{identity.first_name}}', '{{identity.company}}', '{{identity.title}}']
+const TOKENS = ['{{personalization}}', '{{identity.first_name}}', '{{identity.company}}', '{{identity.title}}']
 
 function TemplatesInner() {
   const params = useSearchParams()
@@ -30,6 +30,7 @@ function TemplatesInner() {
   const [channel, setChannel] = useState<Channel>((params.get('channel') as Channel) || 'email')
   const [name, setName] = useState('')
   const [body, setBody] = useState('')
+  const [fallbackBody, setFallbackBody] = useState('')
   const [maxChars, setMaxChars] = useState('')
   const [dirty, setDirty] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -51,6 +52,7 @@ function TemplatesInner() {
     const active = templates.find((t) => t.channel === channel && t.is_active)
     setName(active?.name ?? '')
     setBody(active?.body ?? '')
+    setFallbackBody(active?.fallback_body ?? '')
     setMaxChars(active ? (active.constraints.max_chars ? String(active.constraints.max_chars) : '') : SUGGESTED_MAX[channel])
   }, [channel, templates, dirty])
 
@@ -92,6 +94,7 @@ function TemplatesInner() {
         channel,
         name: name || `${meta.label} template`,
         body,
+        fallback_body: fallbackBody,
         constraints: {
           max_chars: maxChars ? Number(maxChars) : null,
           has_subject: channel === 'email',
@@ -224,9 +227,37 @@ function TemplatesInner() {
             ))}
           </div>
           <p className="hint">
-            Leave placeholders as they are: the model fills them per row, and keeping them literal is what lets the
-            prompt stay cached across every row.
+            {'{{personalization}}'} marks the one line the model writes; everything else is sent as written. Leave
+            placeholders as they are: they are filled per row, and keeping them literal is what lets the prompt stay
+            cached across every row.
           </p>
+
+          <Field
+            id="tpl-fallback"
+            label="Ask-first copy"
+            className="mt-6"
+            aside={
+              <span className="text-xs tabular-nums text-muted-foreground">
+                {fallbackBody.trim() ? `${fallbackBody.length} chars` : 'Optional'}
+              </span>
+            }
+            hint="Sent instead of the template above when the research does not show the prospect has the problem you solve, for example that they use the platform you cut costs on. Being on the list is not evidence, so this copy should ask rather than assume. It can carry its own {{personalization}} line and Subject. Leave it empty to send the template above to every row."
+          >
+            <textarea
+              id="tpl-fallback"
+              className="input h-56 resize-y font-mono text-xs leading-relaxed"
+              value={fallbackBody}
+              placeholder={
+                channel === 'email'
+                  ? 'Subject: quick question\n\nHi {{firstName|there}},\n\n{{personalization}}\n\n<ask whether they have the problem, before offering anything>'
+                  : 'Hi {{firstName|there}},\n\n{{personalization}}\n\n<ask whether they have the problem, before offering anything>'
+              }
+              onChange={(e) => {
+                setFallbackBody(e.target.value)
+                setDirty(true)
+              }}
+            />
+          </Field>
 
           <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-border pt-5">
             <Button onClick={save} loading={busy} disabled={!dirty || !body.trim()} icon={Save}>

@@ -12,7 +12,7 @@ import io
 from typing import AsyncIterator
 
 from app.db import mongo
-from app.models.prospect import Prospect
+from app.models.prospect import Prospect, outreach_of
 from app.sources.registry import ALL_SOURCES
 
 RESEARCH_ERROR_COLUMN = "research_errors"
@@ -23,12 +23,17 @@ def research_columns() -> list[str]:
 
 
 PERSONALIZATION_COLUMNS = [
+    # What to do with the row: personalised / generic / hold. Filter on this.
+    "outreach",
     "channel",
     "subject",
     "message",
+    "personal_line",
     "angle_used",
     "evidence",
     "evidence_source",
+    "fit_evidence",
+    "copy_used",
     "status",
     "status_note",
     "model",
@@ -66,12 +71,21 @@ def row_for(kind: str, prospect: Prospect, headers: list[str]) -> dict[str, str]
         draft = personalization.draft
         angle = personalization.angles[0] if personalization.angles else None
 
+        row["outreach"] = outreach_of(prospect)
         row["channel"] = personalization.channel.value if personalization.channel else ""
         row["subject"] = (draft.subject or "") if draft else ""
         row["message"] = (draft.body or "") if draft else ""
+        # Just the line the model wrote, for a sending tool's custom variable.
+        row["personal_line"] = (draft.personal_line or "") if draft else ""
         row["angle_used"] = angle.angle if angle else ""
         row["evidence"] = angle.evidence if angle else ""
         row["evidence_source"] = angle.source_key if angle else ""
+        # What showed the prospect has the problem we solve, and which copy the
+        # row got: "ask_first" asks whether they do instead of assuming it.
+        row["fit_evidence"] = personalization.fit_evidence or ""
+        row["copy_used"] = (
+            ("ask_first" if personalization.ask_first else "main") if draft else ""
+        )
         row["status"] = prospect.personalize_status.value
         # Carries the thin-context reason and any surviving constraint violation,
         # so a reviewer can see why a row needs attention without opening the app.

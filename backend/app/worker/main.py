@@ -2,17 +2,21 @@
 
 Run with:  arq app.worker.main.WorkerSettings
 
-Concurrency is set by `max_jobs`: rows run in parallel up to that number, which
-is the single knob controlling both scraping provider load and Claude spend
-rate.
+Concurrency is the Settings value, enforced by `app.worker.limiter` and re-read
+while jobs run; it is the single knob controlling both scraping provider load
+and Claude spend rate. arq's own `max_jobs` is only the ceiling, because arq
+fixes it at startup.
 """
 import logging
+
+from arq import cron
 
 from app.core.config import get_settings
 from app.db import mongo
 from app.db.init_db import initialize_database
-from app.worker.bookkeeping import redis_settings
-from app.worker.tasks import personalize_prospect, scrape_prospect
+from app.worker.bookkeeping import redis_settings, resume_due_jobs
+from app.worker.limiter import ARQ_MAX_JOBS
+from app.worker.tasks import MAX_TRIES, personalize_prospect, scrape_prospect
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,7 +42,7 @@ async def startup(ctx: dict) -> None:
             "from .env / docker-compose, or switch Settings to API key mode."
         )
 
-    logger.info("Worker ready (concurrency=%s)", ctx["max_jobs"] if "max_jobs" in ctx else "?")
+    logger.info("Worker ready (concurrency=%s, from Settings)", settings.concurrency)
 
 
 async def shutdown(ctx: dict) -> None:
@@ -51,10 +55,18 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
 
-    max_jobs = 4
-    job_timeout = 600
-    # Rows retry on transient failures (rate limits, network blips). Terminal
-    # failures are caught inside the task and never raise, so they do not retry.
-    max_tries = 3
-    keep_result = 3600
+    # Paused jobs (a plan usage window, repeated rate limits) restart themselves.
+    cron_jobs = [cron(resume_due_jobs, second=0, run_at_startup=True)]
+
+    max_jobs = ARQ_MAX_JOBS
+    # A backstop only. Rows time their own work out much sooner (see tasks.py);
+    # this has to cover a row waiting for a slot or for its turn on LinkedIn,
+    # which at a careful pace can be most of a day.
+    job_timeout = 26 * 60 * 60
+    # arq retries a row only when the task raises `Retry`, which it does for
+    # rate limits. Terminal failures are caught inside the task and never raise.
+    max_tries = MAX_TRIES
+    # Results are not read anywhere, and a stored result would stop the same
+    # row being queued again under its fixed id (see bookkeeping.enqueue_row).
+    keep_result = 0
     health_check_interval = 60

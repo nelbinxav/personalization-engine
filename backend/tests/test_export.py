@@ -98,3 +98,54 @@ def test_combined_export_has_both_column_families():
     columns = columns_for("combined", HEADERS)
     assert "research_website" in columns
     assert "message" in columns
+
+
+def test_export_says_which_copy_a_row_got_and_what_showed_fit():
+    columns = columns_for("personalized", HEADERS)
+    assert "fit_evidence" in columns and "copy_used" in columns
+
+    asked = _prospect(
+        personalization=Personalization(
+            channel=Channel.email, draft=Draft(body="Do you run Databricks?"), ask_first=True
+        )
+    )
+    row = row_for("personalized", asked, HEADERS)
+    assert row["copy_used"] == "ask_first"
+    assert row["fit_evidence"] == ""
+
+    evidenced = _prospect(
+        personalization=Personalization(
+            channel=Channel.email,
+            draft=Draft(body="..."),
+            fit_established=True,
+            fit_evidence="Runs its lakehouse on Databricks",
+        )
+    )
+    row = row_for("personalized", evidenced, HEADERS)
+    assert row["copy_used"] == "main"
+    assert row["fit_evidence"] == "Runs its lakehouse on Databricks"
+
+
+def test_the_personal_line_is_exported_on_its_own():
+    prospect = _prospect(
+        personalization=Personalization(
+            channel=Channel.email,
+            draft=Draft(body="Hi Ada,\n\nYour post on X.\n\nRest of the copy.", personal_line="Your post on X."),
+        )
+    )
+    row = row_for("personalized", prospect, HEADERS)
+    assert row["personal_line"] == "Your post on X."
+    assert "personal_line" in columns_for("personalized", HEADERS)
+
+
+def test_outreach_column_says_what_to_do_with_each_row():
+    written = Personalization(channel=Channel.email, draft=Draft(body="Hi Ada, your post on X."))
+    assert row_for("personalized", _prospect(personalize_status=RowStatus.done, personalization=written), HEADERS)["outreach"] == "personalised"
+    # No personal line but the approved copy is there: still sendable.
+    assert row_for("personalized", _prospect(personalize_status=RowStatus.thin_context, personalization=written), HEADERS)["outreach"] == "generic"
+    # Nothing to send, a flagged contact, or a failure: a person looks first.
+    assert row_for("personalized", _prospect(personalize_status=RowStatus.thin_context), HEADERS)["outreach"] == "hold"
+    assert row_for("personalized", _prospect(personalize_status=RowStatus.needs_review, personalization=written), HEADERS)["outreach"] == "hold"
+    assert row_for("personalized", _prospect(personalize_status=RowStatus.failed), HEADERS)["outreach"] == "hold"
+    assert row_for("personalized", _prospect(), HEADERS)["outreach"] == ""
+    assert columns_for("personalized", HEADERS)[len(HEADERS)] == "outreach"

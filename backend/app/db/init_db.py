@@ -44,4 +44,7 @@ async def initialize_database() -> None:
     # Parsed-but-uncommitted uploads awaiting column mapping.
     await mongo.staging().create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
 
+    # Per-day provider counters (the LinkedIn daily cap), reaped after a few days.
+    await mongo.counters().create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
+
     logger.info("Database indexes ensured")

@@ -11,26 +11,45 @@ from datetime import timedelta
 import httpx
 
 from app.core import settings_store
+from app.core.config import get_settings
 from app.db import mongo
 from app.models.common import Identity, utcnow
 from app.models.prospect import SourceResult
 from app.models.settings import AppSettings
-from app.sources.base import SkipSource, SourceConfig, SourceError, failed
-from app.sources.linkedin import LinkedInCompanySource, LinkedInProfileSource
+from app.sources.base import (
+    SkipSource,
+    SourceConfig,
+    SourceDailyLimit,
+    SourceError,
+    SourceRateLimited,
+    failed,
+)
+from app.sources.exa import PodcastSource
+from app.sources.linkedin import (
+    LinkedInCompanySource,
+    LinkedInPostsSource,
+    LinkedInProfileSource,
+)
 from app.sources.news import NewsSource
 from app.sources.rss import RssSource
 from app.sources.website import WebsiteSource
 
 logger = logging.getLogger(__name__)
 
+# In priority order: the best material for an opener comes first. The chain
+# shows research to the model in this order and the angle prompt ranks by it,
+# so a recent post beats a podcast, which beats a profile, and so on down to
+# the company's own website.
 ALL_SOURCES: dict[str, object] = {
     source.key: source
     for source in (
-        WebsiteSource(),
-        RssSource(),
-        NewsSource(),
+        LinkedInPostsSource(),
+        PodcastSource(),
         LinkedInProfileSource(),
         LinkedInCompanySource(),
+        NewsSource(),
+        WebsiteSource(),
+        RssSource(),
     )
 }
 
@@ -49,6 +68,9 @@ async def build_config(settings: AppSettings | None = None) -> SourceConfig:
             "apify": await settings_store.provider_key("apify"),
         },
         linkedin_provider=settings.linkedin_provider,
+        linkedin_mcp_url=get_settings().linkedin_mcp_url,
+        linkedin_daily_limit=settings.linkedin_daily_limit,
+        linkedin_reads_per_hour=settings.linkedin_reads_per_hour,
     )
 
 
@@ -105,13 +127,20 @@ async def run_one(
         result = await source.fetch(identity, cfg, client)
     except SkipSource:
         return None
+    except SourceRateLimited as exc:
+        # Marked so the worker can put the row back in the queue for later.
+        return failed(source_key, str(exc), target=target, rate_limited=True)
+    except SourceDailyLimit as exc:
+        # Marked so the worker can pause the whole job until tomorrow.
+        return failed(source_key, str(exc), target=target, daily_limit=True)
     except SourceError as exc:
         return failed(source_key, str(exc), target=target)
     except Exception as exc:  # noqa: BLE001 - one bad source must not kill the row
         logger.exception("Source %s crashed for target %s", source_key, target)
         return failed(source_key, f"Unexpected error: {type(exc).__name__}: {exc}", target=target)
 
-    await _cache_put(source_key, target, result, cfg.cache_ttl_hours)
+    ttl_hours = getattr(source, "cache_ttl_hours", cfg.cache_ttl_hours)
+    await _cache_put(source_key, target, result, ttl_hours)
     return result
 
 

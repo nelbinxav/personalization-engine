@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 import anthropic
 
-from app.ai import claude_code, pricing
+from app.ai import claude_code, openai_stage, pricing
 from app.ai.client import AuthUnavailable, get_client
 from app.ai.schemas import AnglesOut, DossierOut, DraftOut, SlotOut, strict_schema
 from app.models.common import Channel, Identity
@@ -30,6 +30,7 @@ from app.models.prompt import Stage
 from app.models.prospect import Angle, Dossier, Draft, Fact, Personalization, SourceResult, Usage
 from app.models.settings import AppSettings, CredentialMode
 from app.models.template import Constraints, Template
+from app.sources.registry import ALL_SOURCES
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 _VOLATILE_TOKEN = re.compile(r"\{\{\s*(research|dossier|angles|identity\.[\w]+|raw\.[^}]+)\s*\}\}")
 _ANY_TOKEN = re.compile(r"\{\{\s*([^}]+?)\s*\}\}")
 _TEMPLATE_TOKEN = re.compile(r"\{\{\s*template\s*\}\}")
+_OFFER_TOKEN = re.compile(r"\{\{\s*offer_context\s*\}\}")
 # A template carrying this slot is approved copy: the model writes only the
 # slot, and every other character, including the sending tool's own merge tags
 # such as {{firstName|there}}, goes out exactly as written.
@@ -56,6 +58,24 @@ class RefusalError(ChainError):
     """Claude declined the request (stop_reason == "refusal")."""
 
 
+class RateLimited(Exception):
+    """Claude is rate-limiting us, overloaded or unreachable, after the SDK's
+    own retries. Not a ChainError: the row did nothing wrong, so the worker
+    tries it again later instead of marking it failed.
+    """
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _retry_after(exc: anthropic.APIStatusError) -> float | None:
+    try:
+        return float(exc.response.headers.get("retry-after"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 @dataclass
 class StageResult:
     parsed: dict
@@ -68,6 +88,8 @@ class StageResult:
 class ChainOutput:
     personalization: Personalization
     thin_context: bool = False
+    # Not to be sent until a person has looked (the contact itself is in doubt).
+    hold: bool = False
     reason: str = ""
     warnings: list[str] = field(default_factory=list)
 
@@ -133,6 +155,19 @@ def fill_slot(template_body: str, context: dict[str, str], text: str) -> str:
     return _SLOT.sub(lambda _: text.strip(), body)
 
 
+def copy_for(template: Template, fit: bool | None) -> tuple[str, bool]:
+    """Which approved copy a row gets, and whether it is the ask-first one.
+
+    The main copy may assume the prospect has the problem we solve, so it only
+    goes to rows where the research showed that. A row on the list without that
+    evidence gets the template's ask-first copy, when it has one. `fit` is None
+    when stage 2 did not run; that row gets the main copy as before.
+    """
+    if fit is False and template.fallback_body.strip():
+        return template.fallback_body, True
+    return template.body, False
+
+
 def generic_draft(template_body: str, context: dict[str, str]) -> Draft | None:
     """The approved copy with the personalization left out, for a row whose
     research supported no angle. It says nothing about the prospect, so it
@@ -141,6 +176,11 @@ def generic_draft(template_body: str, context: dict[str, str]) -> Draft | None:
     """
     if not _SLOT.search(template_body):
         return None
+    return fixed_draft(template_body, context)
+
+
+def fixed_draft(template_body: str, context: dict[str, str]) -> Draft:
+    """Approved copy rendered with no model text at all: any slot is dropped."""
     subject, body = split_subject(template_body)
     body = render_copy(body, context)
     # A slot on its own line goes with the blank line after it; an inline one
@@ -180,14 +220,48 @@ def _split_stable(body: str, context: dict[str, str]) -> tuple[str, bool]:
 # --------------------------------------------------------------------------
 
 
-def format_research(research: dict[str, SourceResult]) -> str:
+_MD_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_MD_LINK = re.compile(r"\[([^\]]*)\]\((?:[^()]|\([^)]*\))*\)")
+_EMPTY_BULLET = re.compile(r"^[ \t]*(?:[-*+]|\d+\.)?[ \t]*$\n?", re.MULTILINE)
+# Bounded by the source itself (a handful of posts), and the best material we
+# have, so it is never trimmed.
+_UNCAPPED_SOURCES = {"linkedin_posts"}
+
+
+def compact_source_text(text: str) -> str:
+    """Drop what costs tokens and tells the model nothing: image tags, link
+    targets (the link text stays) and the empty lines they leave behind. A
+    scraped page is largely navigation, and its URLs are the bulk of that.
+    """
+    text = _MD_IMAGE.sub("", text)
+    text = _MD_LINK.sub(lambda m: m.group(1), text)
+    text = _EMPTY_BULLET.sub("\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def has_usable_research(research: dict[str, SourceResult]) -> bool:
+    return any(r.ok and (r.content or "").strip() for r in research.values())
+
+
+def format_research(research: dict[str, SourceResult], max_chars: int | None = None) -> str:
+    """The research as the model sees it. `max_chars` caps each source after
+    compaction; what is stored on the row and exported is left whole.
+    """
     if not research:
         return "(no research was collected for this prospect)"
 
+    # Best material first (see registry.ALL_SOURCES), whatever order it was
+    # fetched or stored in.
+    priority = {key: rank for rank, key in enumerate(ALL_SOURCES)}
+    ordered = sorted(research.items(), key=lambda item: priority.get(item[0], len(priority)))
+
     blocks: list[str] = []
-    for key, result in research.items():
+    for key, result in ordered:
         if result.ok and result.content:
-            blocks.append(f"### source: {key}\n{result.content}")
+            content = compact_source_text(result.content)
+            if max_chars and key not in _UNCAPPED_SOURCES and len(content) > max_chars:
+                content = content[:max_chars].rstrip() + "\n[trimmed]"
+            blocks.append(f"### source: {key}\n{content}")
         else:
             blocks.append(f"### source: {key}\n(unavailable: {result.error or 'no content'})")
     return "\n\n".join(blocks)
@@ -213,6 +287,16 @@ def format_angles(angles: list[Angle]) -> str:
         return "(no angle available)"
     return "\n\n".join(
         f"Angle: {a.angle}\nEvidence: {a.evidence}  [source: {a.source_key}]" for a in angles
+    )
+
+
+def format_fit(fit: bool, evidence: str) -> str:
+    if fit:
+        return f"Established. The dossier shows it: {evidence}"
+    return (
+        "Not established. Nothing in the dossier shows this company uses the technology, "
+        "or has the problem, that our offer targets. Being on our list is not evidence. "
+        "Do not state or imply that they do; ask instead of assuming."
     )
 
 
@@ -276,6 +360,29 @@ async def call_stage(
     max_tokens: int,
     cacheable: bool,
 ) -> StageResult:
+    if openai_stage.is_openai_model(model):
+        try:
+            parsed, usage = await openai_stage.run_stage(
+                system_text=system_text,
+                user_text=user_text,
+                schema=strict_schema(schema_model),
+                model=model,
+                effort=effort,
+                max_tokens=max_tokens,
+            )
+        except openai_stage.OpenAIBusy as exc:
+            raise RateLimited(str(exc), exc.retry_after) from exc
+        except openai_stage.OpenAIRefusal as exc:
+            raise RefusalError(str(exc)) from exc
+        except openai_stage.OpenAIError as exc:
+            raise ChainError(str(exc)) from exc
+        return StageResult(
+            parsed=parsed,
+            usage=usage,
+            cacheable=cacheable,
+            cache_hit=usage.cache_read_input_tokens > 0,
+        )
+
     if client is None:
         # claude_code mode: the subscription, through the unmodified CLI.
         try:
@@ -319,12 +426,16 @@ async def call_stage(
     except anthropic.NotFoundError as exc:
         raise ChainError(f"Model '{model}' not found or not available to this account: {exc}") from exc
     except anthropic.RateLimitError as exc:
-        # arq retries the row; surfacing it as a ChainError would waste the attempt.
-        raise
+        raise RateLimited(f"Claude rate limit reached: {exc.message}", _retry_after(exc)) from exc
     except anthropic.APIStatusError as exc:
+        if exc.status_code >= 500:
+            # Overloaded (529) or a server error: transient, same as a rate limit.
+            raise RateLimited(
+                f"Claude API is unavailable ({exc.status_code}): {exc.message}", _retry_after(exc)
+            ) from exc
         raise ChainError(f"Claude API error {exc.status_code}: {exc.message}") from exc
     except anthropic.APIConnectionError as exc:
-        raise ChainError(f"Could not reach the Claude API: {exc}") from exc
+        raise RateLimited(f"Could not reach the Claude API: {exc}") from exc
 
     # A refusal is an HTTP 200, so this has to be checked before reading content.
     if response.stop_reason == "refusal":
@@ -358,6 +469,11 @@ async def call_stage(
 # --------------------------------------------------------------------------
 # The chain
 # --------------------------------------------------------------------------
+
+
+def stage_model(settings: AppSettings, stage: Stage) -> str:
+    """The model a stage runs on: its own override, else the default model."""
+    return settings.ai.stage_models.get(str(int(stage))) or settings.ai.model
 
 
 def _subject_violations(subject: str | None, constraints: Constraints) -> list[str]:
@@ -407,26 +523,68 @@ async def run_chain(
     settings: AppSettings,
     channel: Channel,
 ) -> ChainOutput:
-    # None selects the claude_code path in call_stage.
-    subscription = settings.ai.mode is CredentialMode.claude_code
-    client = None if subscription else await get_client()
     model = settings.ai.model
+
+    if not has_usable_research(research):
+        # Every source came back empty or failed. Asking Claude would spend two
+        # calls to conclude there is nothing to say, so the row goes straight to
+        # the copy that claims nothing about the prospect.
+        template_text, ask_first = copy_for(template, False)
+        context = build_context(identity, raw, settings)
+        return ChainOutput(
+            personalization=Personalization(
+                channel=channel,
+                draft=(
+                    fixed_draft(template_text, context)
+                    if ask_first
+                    else generic_draft(template_text, context)
+                ),
+                model=model,
+                template_version=template.version,
+                fit_established=False,
+                ask_first=ask_first,
+            ),
+            thin_context=True,
+            reason="None of the research sources returned anything for this row, so there "
+            "was nothing to personalize from.",
+        )
+
     max_tokens = settings.ai.max_tokens
     enabled = set(settings.ai.enabled_stages)
 
+    def model_for(stage: Stage) -> str:
+        return stage_model(settings, stage)
+
+    models_used = list(dict.fromkeys(model_for(s) for s in Stage if int(s) in enabled))
+    model = " + ".join(models_used) or model
+
+    # None selects the claude_code path in call_stage. A stage on an OpenAI
+    # model never touches the Claude credential, so only ask for it if needed.
+    subscription = settings.ai.mode is CredentialMode.claude_code
+    needs_claude = any(not openai_stage.is_openai_model(m) for m in models_used)
+    client = None if subscription or not needs_claude else await get_client()
+
     usage_total = Usage()
+    usage_by_stage: dict[str, Usage] = {}
+    cost_total = 0.0
     warnings: list[str] = []
 
-    def cost_of(usage: Usage) -> float:
-        # Subscription usage is covered by the plan, so nothing is billed per row.
-        return 0.0 if subscription else pricing.cost_usd(model, usage)
+    def cost_of(_: Usage) -> float:
+        return round(cost_total, 6)
 
     def effort_for(stage: Stage) -> str:
         return settings.ai.effort.get(str(int(stage)), "high")
 
     def accumulate(result: StageResult, stage: Stage) -> None:
-        nonlocal usage_total
+        nonlocal usage_total, cost_total
         usage_total = usage_total.add(result.usage)
+        key = str(int(stage))
+        usage_by_stage[key] = usage_by_stage.get(key, Usage()).add(result.usage)
+        stage_model_id = model_for(stage)
+        # Claude on the subscription is covered by the plan; an OpenAI stage is
+        # always billed per token.
+        if openai_stage.is_openai_model(stage_model_id) or not subscription:
+            cost_total += pricing.cost_usd(stage_model_id, result.usage)
         if result.cacheable and not result.cache_hit:
             logger.debug("Stage %s prefix was cacheable but missed", int(stage))
         if not result.cacheable:
@@ -436,18 +594,19 @@ async def run_chain(
             )
 
     base_context = build_context(identity, raw, settings)
+    research_text = format_research(research, settings.ai.research_chars_per_source)
 
     # --- Stage 1: dossier -------------------------------------------------
     dossier = Dossier()
     if int(Stage.dossier) in enabled:
         system_text, cacheable = _split_stable(prompts[int(Stage.dossier)], base_context)
-        user_text = prospect_block(identity, research=format_research(research))
+        user_text = prospect_block(identity, research=research_text)
         result = await call_stage(
             client,
             system_text=system_text,
             user_text=user_text,
             schema_model=DossierOut,
-            model=model,
+            model=model_for(Stage.dossier),
             effort=effort_for(Stage.dossier),
             max_tokens=max_tokens,
             cacheable=cacheable,
@@ -459,10 +618,34 @@ async def run_chain(
             facts=[Fact(text=f.text, source_key=f.source_key) for f in parsed.facts],
             recent_events=[Fact(text=f.text, source_key=f.source_key) for f in parsed.recent_events],
             tech_signals=[Fact(text=f.text, source_key=f.source_key) for f in parsed.tech_signals],
+            has_signal=parsed.has_signal,
+            signal_note=parsed.signal_note.strip(),
+            contact_issue=parsed.contact_issue.strip(),
         )
     else:
         # Stage 1 off: hand the raw research straight to stage 2.
-        dossier = Dossier(summary=format_research(research))
+        dossier = Dossier(summary=research_text)
+
+    if dossier.contact_issue:
+        # The research says this is the wrong person to write to. No copy at
+        # all, not even the generic one: a message to someone who has died or
+        # left is worse than no message. A person decides what happens next.
+        return ChainOutput(
+            personalization=Personalization(
+                channel=channel,
+                dossier=dossier,
+                model=model,
+                usage=usage_total,
+                usage_by_stage=usage_by_stage,
+                cost_usd=cost_of(usage_total),
+                template_version=template.version,
+                fit_established=False,
+            ),
+            thin_context=True,
+            hold=True,
+            reason=f"Check before sending: {dossier.contact_issue}",
+            warnings=warnings,
+        )
 
     dossier_text = format_dossier(dossier)
 
@@ -470,17 +653,33 @@ async def run_chain(
     angles: list[Angle] = []
     thin_context = False
     reason = ""
+    # Whether the research showed this prospect has the problem we solve. Being
+    # in the sheet is not evidence of that, so it is decided from the dossier.
+    fit: bool | None = None
+    fit_evidence = ""
 
-    if int(Stage.angle) in enabled:
+    if int(Stage.angle) in enabled and not dossier.has_signal:
+        # Stage 1 found nothing related to what we sell and nothing the prospect
+        # said themselves. Most rows that end without an angle end here, so the
+        # second call is not spent confirming it.
+        thin_context = True
+        fit = False
+        reason = dossier.signal_note or "The research held nothing related to what we sell."
+    elif int(Stage.angle) in enabled:
         context = {**base_context, "dossier": dossier_text}
-        system_text, cacheable = _split_stable(prompts[int(Stage.angle)], context)
+        prompt_body = prompts[int(Stage.angle)]
+        if not _OFFER_TOKEN.search(prompt_body):
+            # Relevance cannot be judged against an offer the model never saw.
+            # The same for every row, so this stays cacheable.
+            prompt_body += "\n\nWHAT WE SELL\n{{offer_context}}"
+        system_text, cacheable = _split_stable(prompt_body, context)
         user_text = prospect_block(identity, dossier=dossier_text)
         result = await call_stage(
             client,
             system_text=system_text,
             user_text=user_text,
             schema_model=AnglesOut,
-            model=model,
+            model=model_for(Stage.angle),
             effort=effort_for(Stage.angle),
             max_tokens=max_tokens,
             cacheable=cacheable,
@@ -489,7 +688,7 @@ async def run_chain(
         parsed = AnglesOut.model_validate(result.parsed)
 
         # Drop angles whose evidence does not point at a real source.
-        known_sources = set(research.keys()) | {"website", "rss", "news", "linkedin_profile", "linkedin_company"}
+        known_sources = set(research.keys()) | set(ALL_SOURCES)
         angles = [
             Angle(angle=a.angle, evidence=a.evidence, source_key=a.source_key)
             for a in parsed.angles
@@ -500,20 +699,39 @@ async def run_chain(
             thin_context = True
             reason = parsed.reason or "The research did not support a specific angle."
 
+        # Same rule as the angles: a claim of fit with no dossier item behind it
+        # does not count.
+        fit_evidence = parsed.fit_evidence.strip()
+        fit = bool(parsed.fit_established and fit_evidence)
+        if not fit:
+            fit_evidence = ""
+
+    template_text, ask_first = copy_for(template, fit)
+
     if thin_context:
         # Stop before stage 3. Generating anyway is exactly the failure mode the
-        # citation guard exists to prevent. A slot template still yields its
-        # approved copy with no personal line, which claims nothing about them.
+        # citation guard exists to prevent. The row still yields approved copy
+        # with no personal line: the ask-first copy when the template has one,
+        # otherwise a slot template's main copy. Neither claims anything about
+        # the prospect.
         return ChainOutput(
             personalization=Personalization(
                 channel=channel,
                 dossier=dossier,
                 angles=angles,
-                draft=generic_draft(template.body, base_context),
+                draft=(
+                    fixed_draft(template_text, base_context)
+                    if ask_first
+                    else generic_draft(template_text, base_context)
+                ),
                 model=model,
                 usage=usage_total,
+                usage_by_stage=usage_by_stage,
                 cost_usd=cost_of(usage_total),
                 template_version=template.version,
+                fit_established=fit,
+                fit_evidence=fit_evidence or None,
+                ask_first=ask_first,
             ),
             thin_context=True,
             reason=reason,
@@ -526,12 +744,13 @@ async def run_chain(
     # placeholders so the stage-3 prefix stays identical across every row (and
     # therefore cacheable). The model fills them from the PROSPECT block in the
     # user turn, and `_constraint_violations` catches any it leaves behind.
-    template_text = template.body
+    # `template_text` is the main copy or the ask-first copy (see `copy_for`);
+    # either one is the same for every row that gets it.
 
     # Slot mode: the model writes only {{personalization}} and the code places it,
     # so the approved copy cannot drift and a reply can never be just the opener.
-    slot_mode = bool(_SLOT.search(template.body))
-    fixed_subject, slot_body = split_subject(template.body) if slot_mode else (None, "")
+    slot_mode = bool(_SLOT.search(template_text))
+    fixed_subject, slot_body = split_subject(template_text) if slot_mode else (None, "")
     budget: int | None = None
     if slot_mode:
         if template.constraints.max_chars:
@@ -562,14 +781,22 @@ async def run_chain(
         # blind. Both blocks are identical for every row, so this stays cacheable.
         prompt_body += "\n\nTEMPLATE\n{{template}}\n\nHARD CONSTRAINTS\n{{constraints}}"
     system_text, cacheable = _split_stable(prompt_body, context)
-    user_text = prospect_block(identity, angle=angles_text, dossier=dossier_text)
+    sections = {"angle": angles_text, "dossier": dossier_text}
+    if fit is not None:
+        # In the user turn, not the prompt: it differs per row.
+        sections["evidence_of_fit"] = format_fit(fit, fit_evidence)
+    user_text = prospect_block(identity, **sections)
     schema_model = SlotOut if slot_mode else DraftOut
 
     def assemble(parsed: dict) -> tuple[Draft, list[str]]:
         if slot_mode:
             out = SlotOut.model_validate(parsed)
             subject = render_copy(fixed_subject, base_context) if fixed_subject else out.subject
-            built = Draft(subject=subject, body=fill_slot(slot_body, base_context, out.personalization))
+            built = Draft(
+                subject=subject,
+                body=fill_slot(slot_body, base_context, out.personalization),
+                personal_line=out.personalization.strip() or None,
+            )
             return built, _slot_violations(out.personalization, budget) + _subject_violations(
                 subject, template.constraints
             )
@@ -582,7 +809,7 @@ async def run_chain(
         system_text=system_text,
         user_text=user_text,
         schema_model=schema_model,
-        model=model,
+        model=model_for(Stage.draft),
         effort=effort_for(Stage.draft),
         max_tokens=max_tokens,
         cacheable=cacheable,
@@ -604,7 +831,7 @@ async def run_chain(
             system_text=system_text,
             user_text=retry_text,
             schema_model=schema_model,
-            model=model,
+            model=model_for(Stage.draft),
             effort=effort_for(Stage.draft),
             max_tokens=max_tokens,
             cacheable=cacheable,
@@ -628,9 +855,13 @@ async def run_chain(
             draft=draft,
             model=model,
             usage=usage_total,
+            usage_by_stage=usage_by_stage,
             cost_usd=cost_of(usage_total),
             template_version=template.version,
             constraint_warning=constraint_warning,
+            fit_established=fit,
+            fit_evidence=fit_evidence or None,
+            ask_first=ask_first,
         ),
         warnings=warnings,
     )

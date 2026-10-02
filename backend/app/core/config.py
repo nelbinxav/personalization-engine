@@ -31,12 +31,19 @@ class Settings(BaseSettings):
     anthropic_config_dir: str = "/var/lib/anthropic"
     anthropic_oauth_profile: str = "app"
     anthropic_api_key: Optional[str] = None
+    # Bootstrap fallback for stages given to an OpenAI model; Settings wins.
+    openai_api_key: Optional[str] = None
 
     # --- scraping providers ------------------------------------------------
     # Fallbacks only; the UI-managed values in the `settings` collection win.
     jina_api_key: Optional[str] = None
     serper_api_key: Optional[str] = None
     apify_token: Optional[str] = None
+    # The LinkedIn browser service (docker compose profile "linkedin"), used by
+    # the `account` LinkedIn provider.
+    linkedin_mcp_url: str = "http://linkedin:8080/mcp"
+    # Shared with the linkedin service: how Settings asks it to open a sign-in.
+    linkedin_control_dir: str = "/var/lib/linkedin-control"
 
     # --- google sheets ------------------------------------------------------
     google_service_account_json: Optional[str] = None

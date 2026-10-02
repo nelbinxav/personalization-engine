@@ -18,6 +18,7 @@ import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 
+import { JobWatcher, NotificationPrompt } from '@/components/job-watcher'
 import { Spinner, Toaster, cn } from '@/components/ui'
 import { api, ApiError } from '@/lib/api'
 import type { AiStatus } from '@/lib/types'
@@ -145,6 +146,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         ))}
       </nav>
 
+      <NotificationPrompt />
+
       {/* Claude connection state is visible on every page: a dead credential
           parks jobs, and that should never be a surprise. */}
       {ai && (
@@ -238,6 +241,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
       <main className="mx-auto max-w-6xl px-4 py-8 sm:px-8 lg:py-10">{children}</main>
       <Toaster />
+      <JobWatcher />
     </div>
   )
 }

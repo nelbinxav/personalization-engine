@@ -3,20 +3,51 @@
 One task per prospect per phase. This is what makes a 500-row sheet safe: a row
 that fails retries on its own, a row that succeeds is never redone, and killing
 the worker mid-run loses at most the in-flight rows.
-"""
-import logging
 
-from app.ai.chain import ChainError, RefusalError, run_chain
+A job has to be able to run unattended, so every path out of a task leaves the
+row in a counted state or back in the queue:
+
+  * a provider or Claude asking us to slow down puts the row back with a
+    growing delay (arq only retries on `Retry`, never on a plain exception);
+  * if Claude keeps refusing, or the plan's usage window is spent, the whole
+    job pauses and `bookkeeping.resume_due_jobs` restarts it by itself;
+  * anything unexpected marks the row failed rather than leaving it "running"
+    with a job that can never close.
+"""
+import asyncio
+import logging
+from datetime import timedelta
+
+from arq import Retry
+
+from app.ai.chain import ChainError, RateLimited, RefusalError, run_chain
+from app.ai.claude_code import UsageLimitReached
 from app.ai.client import AuthUnavailable
 from app.core import settings_store
 from app.db import mongo
 from app.models.common import Channel, RowStatus, utcnow
 from app.models.prospect import Prospect
 from app.models.template import Template
-from app.sources import registry
-from app.worker import bookkeeping
+from app.sources import linkedin_account, registry
+from app.worker import bookkeeping, limiter
 
 logger = logging.getLogger(__name__)
+
+# Attempts per row, counting the first. arq's `max_tries` is set from this.
+MAX_TRIES = 5
+# Upper bounds on the work itself, well under arq's job_timeout, so a hung row
+# is marked failed here instead of being killed where nothing can record it.
+SCRAPE_TIMEOUT = 8 * 60
+PERSONALIZE_TIMEOUT = 25 * 60
+# How long the job waits when Claude rate-limits a row on every attempt.
+RATE_LIMIT_PAUSE = timedelta(minutes=10)
+
+
+def retry_delay(attempt: int, retry_after: float | None = None) -> float:
+    """Seconds before a rate-limited row is tried again: 30s, 1m, 2m, 4m, and
+    never sooner than the provider asked for."""
+    backoff = min(30 * 2 ** (attempt - 1), 600)
+    return min(max(backoff, retry_after or 0), 900)
 
 
 async def _load_prospect(prospect_id: str) -> Prospect | None:
@@ -24,8 +55,34 @@ async def _load_prospect(prospect_id: str) -> Prospect | None:
     return Prospect.model_validate(doc) if doc else None
 
 
+async def _set_status(prospect_id: str, field: str, status: RowStatus) -> None:
+    await mongo.prospects().update_one({"_id": prospect_id}, {"$set": {field: status.value}})
+
+
 async def scrape_prospect(ctx: dict, job_id: str, prospect_id: str) -> str:
     """Fetch every enabled source for one prospect."""
+    # Checked before waiting for a slot so a cancelled job drains quickly.
+    if not await bookkeeping.job_is_active(job_id):
+        return "cancelled"
+
+    job = await mongo.jobs().find_one({"_id": job_id}, {"options.sources": 1})
+    settings = await settings_store.load()
+    sources = ((job or {}).get("options") or {}).get("sources") or []
+    if settings.linkedin_provider == "account" and any(k.startswith("linkedin_") for k in sources):
+        # LinkedIn is read slowly and one page at a time. These rows queue for
+        # their turn here, outside the row slots, so they do not hold up rows
+        # that have nothing to do with LinkedIn.
+        _, longest_gap = linkedin_account.read_gap(settings.linkedin_reads_per_hour)
+        timeout = SCRAPE_TIMEOUT + 2 * (longest_gap + linkedin_account.TOOL_TIMEOUT)
+        async with limiter.linkedin_row:
+            async with limiter.rows.slot():
+                return await _scrape(ctx, job_id, prospect_id, timeout)
+
+    async with limiter.rows.slot():
+        return await _scrape(ctx, job_id, prospect_id, SCRAPE_TIMEOUT)
+
+
+async def _scrape(ctx: dict, job_id: str, prospect_id: str, timeout: float) -> str:
     if not await bookkeeping.job_is_active(job_id):
         return "cancelled"
 
@@ -36,18 +93,31 @@ async def scrape_prospect(ctx: dict, job_id: str, prospect_id: str) -> str:
     if not job or not prospect:
         await bookkeeping.record_row(job_id, "failed")
         return "missing"
+    if not await bookkeeping.claim_row(prospect_id, "scrape_status"):
+        return "duplicate"
 
     options = job.get("options", {})
     source_keys: list[str] = options.get("sources") or []
     use_cache = not options.get("force", False)
 
-    await mongo.prospects().update_one(
-        {"_id": prospect_id}, {"$set": {"scrape_status": RowStatus.running.value}}
-    )
-
     try:
         cfg = await registry.build_config()
-        results = await registry.run_sources(prospect.identity, source_keys, cfg, use_cache)
+        results = await asyncio.wait_for(
+            registry.run_sources(prospect.identity, source_keys, cfg, use_cache),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        await mongo.prospects().update_one(
+            {"_id": prospect_id},
+            {
+                "$set": {
+                    "scrape_status": RowStatus.failed.value,
+                    "scrape_error": f"Research took longer than {int(timeout // 60)} minutes.",
+                }
+            },
+        )
+        await bookkeeping.record_row(job_id, "failed")
+        return "failed"
     except Exception as exc:  # noqa: BLE001 - the registry already isolates per source
         logger.exception("Scrape crashed for prospect %s", prospect_id)
         await mongo.prospects().update_one(
@@ -56,6 +126,23 @@ async def scrape_prospect(ctx: dict, job_id: str, prospect_id: str) -> str:
         )
         await bookkeeping.record_row(job_id, "failed")
         return "failed"
+
+    # Our own daily cap for a provider is spent (the LinkedIn account). Nothing
+    # more will work today, so the job waits for tomorrow instead of finishing
+    # the sheet without that source. What this row did fetch is cached.
+    capped = next((r for r in results.values() if r.meta.get("daily_limit")), None)
+    if capped:
+        await _set_status(prospect_id, "scrape_status", RowStatus.queued)
+        tomorrow = (utcnow() + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
+        await bookkeeping.pause_job(job_id, capped.error or "Daily limit reached.", tomorrow)
+        return "paused"
+
+    # A provider asked us to slow down: try the row again later. The sources
+    # that worked are cached, so only the limited ones are fetched again.
+    attempt = ctx.get("job_try", 1)
+    if attempt < MAX_TRIES and any(r.meta.get("rate_limited") for r in results.values()):
+        await _set_status(prospect_id, "scrape_status", RowStatus.queued)
+        raise Retry(defer=retry_delay(attempt))
 
     if not results:
         # Nothing applied to this row -- no website, no LinkedIn. Not a failure.
@@ -98,6 +185,14 @@ async def personalize_prospect(ctx: dict, job_id: str, prospect_id: str) -> str:
     """Run the three-stage chain for one prospect."""
     if not await bookkeeping.job_is_active(job_id):
         return "cancelled"
+    async with limiter.rows.slot():
+        return await _personalize(ctx, job_id, prospect_id)
+
+
+async def _personalize(ctx: dict, job_id: str, prospect_id: str) -> str:
+    # Again after the wait: the job may have been paused or cancelled meanwhile.
+    if not await bookkeeping.job_is_active(job_id):
+        return "cancelled"
 
     await bookkeeping.mark_started(job_id)
 
@@ -106,6 +201,21 @@ async def personalize_prospect(ctx: dict, job_id: str, prospect_id: str) -> str:
     if not job or not prospect:
         await bookkeeping.record_row(job_id, "failed")
         return "missing"
+    if not await bookkeeping.claim_row(prospect_id, "personalize_status"):
+        return "duplicate"
+
+    async def fail(message: str) -> str:
+        await mongo.prospects().update_one(
+            {"_id": prospect_id},
+            {
+                "$set": {
+                    "personalize_status": RowStatus.failed.value,
+                    "personalize_error": message,
+                }
+            },
+        )
+        await bookkeeping.record_row(job_id, "failed")
+        return "failed"
 
     options = job.get("options", {})
     channel = Channel(options.get("channel") or Channel.email.value)
@@ -123,10 +233,6 @@ async def personalize_prospect(ctx: dict, job_id: str, prospect_id: str) -> str:
         await bookkeeping.record_row(job_id, "skipped")
         return "skipped"
 
-    await mongo.prospects().update_one(
-        {"_id": prospect_id}, {"$set": {"personalize_status": RowStatus.running.value}}
-    )
-
     settings = await settings_store.load()
 
     template_doc = await mongo.templates().find_one({"_id": options.get("template_id")})
@@ -135,17 +241,7 @@ async def personalize_prospect(ctx: dict, job_id: str, prospect_id: str) -> str:
             {"channel": channel.value, "is_active": True}
         )
     if not template_doc:
-        await mongo.prospects().update_one(
-            {"_id": prospect_id},
-            {
-                "$set": {
-                    "personalize_status": RowStatus.failed.value,
-                    "personalize_error": f"No active template for channel '{channel.value}'.",
-                }
-            },
-        )
-        await bookkeeping.record_row(job_id, "failed")
-        return "failed"
+        return await fail(f"No active template for channel '{channel.value}'.")
 
     template = Template.model_validate(template_doc)
 
@@ -158,65 +254,68 @@ async def personalize_prospect(ctx: dict, job_id: str, prospect_id: str) -> str:
         if not doc:
             doc = await mongo.prompts().find_one({"stage": stage, "is_active": True})
         if not doc:
-            await mongo.prospects().update_one(
-                {"_id": prospect_id},
-                {
-                    "$set": {
-                        "personalize_status": RowStatus.failed.value,
-                        "personalize_error": f"No active prompt for stage {stage}.",
-                    }
-                },
-            )
-            await bookkeeping.record_row(job_id, "failed")
-            return "failed"
+            return await fail(f"No active prompt for stage {stage}.")
         prompts[stage] = doc["body"]
 
     try:
-        output = await run_chain(
-            identity=prospect.identity,
-            raw=prospect.raw,
-            research=prospect.research,
-            prompts=prompts,
-            template=template,
-            settings=settings,
-            channel=channel,
+        output = await asyncio.wait_for(
+            run_chain(
+                identity=prospect.identity,
+                raw=prospect.raw,
+                research=prospect.research,
+                prompts=prompts,
+                template=template,
+                settings=settings,
+                channel=channel,
+            ),
+            timeout=PERSONALIZE_TIMEOUT,
         )
+    except UsageLimitReached as exc:
+        # The plan's usage window is spent. Nothing is wrong with the row or the
+        # credential: pause the job, and the worker restarts it after the reset.
+        await _set_status(prospect_id, "personalize_status", RowStatus.queued)
+        await bookkeeping.pause_job(job_id, str(exc), exc.resume_at)
+        return "paused"
     except AuthUnavailable as exc:
         # Credential problem is job-wide, not row-specific. Park the whole job so
         # the operator reconnects once instead of watching 500 rows fail.
-        await mongo.prospects().update_one(
-            {"_id": prospect_id}, {"$set": {"personalize_status": RowStatus.pending.value}}
-        )
+        await _set_status(prospect_id, "personalize_status", RowStatus.pending)
         await bookkeeping.block_job(job_id, str(exc))
         return "blocked"
+    except RateLimited as exc:
+        await _set_status(prospect_id, "personalize_status", RowStatus.queued)
+        attempt = ctx.get("job_try", 1)
+        if attempt < MAX_TRIES:
+            raise Retry(defer=retry_delay(attempt, exc.retry_after)) from exc
+        # Still limited after every attempt: slowing down one row is not enough,
+        # so give the whole job a rest.
+        await bookkeeping.pause_job(
+            job_id,
+            f"{str(exc).rstrip('.')}. The job paused itself and will carry on automatically.",
+            utcnow() + RATE_LIMIT_PAUSE,
+        )
+        return "paused"
     except RefusalError as exc:
-        await mongo.prospects().update_one(
-            {"_id": prospect_id},
-            {
-                "$set": {
-                    "personalize_status": RowStatus.failed.value,
-                    "personalize_error": str(exc),
-                }
-            },
-        )
-        await bookkeeping.record_row(job_id, "failed")
-        return "failed"
+        return await fail(str(exc))
     except ChainError as exc:
-        await mongo.prospects().update_one(
-            {"_id": prospect_id},
-            {
-                "$set": {
-                    "personalize_status": RowStatus.failed.value,
-                    "personalize_error": str(exc),
-                }
-            },
+        return await fail(str(exc))
+    except asyncio.TimeoutError:
+        return await fail(
+            f"Personalization took longer than {PERSONALIZE_TIMEOUT // 60} minutes."
         )
-        await bookkeeping.record_row(job_id, "failed")
-        return "failed"
+    except Exception as exc:  # noqa: BLE001 - a row must always end in a counted state
+        logger.exception("Personalization crashed for prospect %s", prospect_id)
+        return await fail(f"Unexpected error: {type(exc).__name__}: {exc}")
 
     personalization = output.personalization
     personalization.generated_at = utcnow()
-    status = RowStatus.thin_context if output.thin_context else RowStatus.done
+    if output.hold or (output.thin_context and personalization.draft is None):
+        # The contact is in doubt, or there is nothing to send: a person decides.
+        status = RowStatus.needs_review
+    elif output.thin_context:
+        status = RowStatus.thin_context
+    else:
+        status = RowStatus.done
 
     await mongo.prospects().update_one(
         {"_id": prospect_id},
@@ -234,5 +333,14 @@ async def personalize_prospect(ctx: dict, job_id: str, prospect_id: str) -> str:
 
     # thin_context counts as done for progress: the row was processed, it just
     # needs a human rather than a retry.
-    await bookkeeping.record_row(job_id, "done", cost_usd=personalization.cost_usd)
+    usage = personalization.usage
+    await bookkeeping.record_row(
+        job_id,
+        "done",
+        cost_usd=personalization.cost_usd,
+        tokens=usage.input_tokens
+        + usage.output_tokens
+        + usage.cache_read_input_tokens
+        + usage.cache_creation_input_tokens,
+    )
     return status.value

@@ -19,6 +19,8 @@ services:
       - ./backend/app:/app/app
       - anthropic_profile:/var/lib/anthropic
       - claude_code_profile:/var/lib/claude-code
+      # Where Settings asks the LinkedIn service to open its sign-in browser.
+      - linkedin_control:/var/lib/linkedin-control
 
   worker:
     build: ./backend
@@ -56,6 +58,35 @@ services:
       - "${BIND_ADDRESS:-127.0.0.1}:3000:3000"
     depends_on: [api]
 
+  # LinkedIn through a signed-in LinkedIn account: the `account` LinkedIn
+  # provider, needed for recent posts. Opt-in, because it runs a browser and
+  # acts as a real LinkedIn user:
+  #   docker compose --profile linkedin up -d
+  # Sign-in and the risks are in deploy/LINKEDIN.md. No port is published; only
+  # the api and worker containers can reach it.
+  linkedin:
+    image: stickerdaniel/linkedin-mcp-server:4.26.1
+    container_name: pe-linkedin
+    profiles: ["linkedin"]
+    restart: unless-stopped
+    environment:
+      # It refuses requests addressed to any name it was not told about.
+      FASTMCP_HTTP_ALLOWED_HOSTS: '["linkedin","linkedin:8080"]'
+      TOOL_TIMEOUT: "240"
+      LOG_LEVEL: WARNING
+    # Only the sign-in browser listens here, and only while someone is
+    # connecting an account from Settings. Loopback, so it opens on this machine.
+    ports:
+      - "127.0.0.1:6080:6080"
+    volumes:
+      - linkedin_profile:/home/pwuser/.linkedin-mcp
+      - linkedin_control:/control
+      - ./deploy/linkedin-run.sh:/usr/local/bin/pe-linkedin-run.sh:ro
+      # The sign-in window with paste support, served next to the image's own.
+      - ./deploy/linkedin-viewer.html:/usr/share/novnc/pe.html:ro
+    # Runs the server, and its login browser when Settings asks (see the script).
+    entrypoint: ["tini", "-e", "143", "--", "/bin/bash", "/usr/local/bin/pe-linkedin-run.sh"]
+
   mongo:
     image: mongo:7
     container_name: pe-mongo
@@ -76,3 +107,5 @@ volumes:
   redis_data:
   anthropic_profile:
   claude_code_profile:
+  linkedin_profile:
+  linkedin_control:

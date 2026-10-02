@@ -43,8 +43,12 @@ class RowStatus(str, Enum):
     done = "done"
     failed = "failed"
     skipped = "skipped"
-    # Generated, but nothing solid to personalize on -- needs a human look.
+    # No personal line: the research supported none. The row still carries the
+    # template's approved copy (ask-first or generic), which is fine to send.
     thin_context = "thin_context"
+    # Do not send until a person has looked: the research says the contact is
+    # wrong (left the company, died, company gone), or there is no message.
+    needs_review = "needs_review"
 
 
 class Identity(BaseModel):
