@@ -37,6 +37,13 @@ const KEY_FIELDS: { name: string; label: string; hint: string }[] = [
 ]
 
 // The three chain stages, in the order they run.
+function termList(text: string): string[] {
+  return text
+    .split('\n')
+    .map((t) => t.trim())
+    .filter(Boolean)
+}
+
 const STAGES = [
   { key: '1', label: 'Gather facts', note: 'Reads the research. The bulk of the tokens, the least judgement.' },
   { key: '2', label: 'Choose the angle', note: 'Decides what is relevant and whether there is evidence of fit.' },
@@ -79,6 +86,9 @@ export default function SettingsPage() {
   const [model, setModel] = useState('claude-sonnet-5-5')
   const [stageModels, setStageModels] = useState<Record<string, string>>({})
   const [efforts, setEfforts] = useState<Record<string, string>>({})
+  const [outputMode, setOutputMode] = useState<'full_message' | 'personalized_line'>('full_message')
+  const [compact, setCompact] = useState(false)
+  const [terms, setTerms] = useState('')
   const [enabledSources, setEnabledSources] = useState<string[]>([])
   const [linkedinProvider, setLinkedinProvider] = useState('apify')
   const [keyEdits, setKeyEdits] = useState<Record<string, string>>({})
@@ -106,6 +116,9 @@ export default function SettingsPage() {
     setModel(settings.settings.ai.model)
     setStageModels(settings.settings.ai.stage_models ?? {})
     setEfforts(settings.settings.ai.effort ?? {})
+    setOutputMode(settings.settings.ai.personalization_output_mode ?? 'full_message')
+    setCompact(settings.settings.ai.compact_research ?? false)
+    setTerms((settings.settings.ai.relevance_terms ?? []).join('\n'))
     setEnabledSources(settings.settings.enabled_sources)
     setLinkedinProvider(settings.settings.linkedin_provider)
     setMethod((current) => current ?? status?.mode ?? 'claude_code')
@@ -123,6 +136,9 @@ export default function SettingsPage() {
       linkedinDailyLimit !== saved.linkedin_daily_limit ||
       linkedinPerHour !== saved.linkedin_reads_per_hour ||
       model !== saved.ai.model ||
+      outputMode !== (saved.ai.personalization_output_mode ?? 'full_message') ||
+      compact !== (saved.ai.compact_research ?? false) ||
+      termList(terms).join() !== (saved.ai.relevance_terms ?? []).join() ||
       STAGES.some(
         (st) =>
           (stageModels[st.key] ?? '') !== (saved.ai.stage_models?.[st.key] ?? '') ||
@@ -149,6 +165,9 @@ export default function SettingsPage() {
     setModel(saved.ai.model)
     setStageModels(saved.ai.stage_models ?? {})
     setEfforts(saved.ai.effort ?? {})
+    setOutputMode(saved.ai.personalization_output_mode ?? 'full_message')
+    setCompact(saved.ai.compact_research ?? false)
+    setTerms((saved.ai.relevance_terms ?? []).join('\n'))
     setEnabledSources(saved.enabled_sources)
     setLinkedinProvider(saved.linkedin_provider)
     setKeyEdits({})
@@ -168,7 +187,14 @@ export default function SettingsPage() {
         linkedin_reads_per_hour: linkedinPerHour,
         enabled_sources: enabledSources,
         linkedin_provider: linkedinProvider,
-        ai: { model, stage_models: stageModels, effort: efforts },
+        ai: {
+          model,
+          stage_models: stageModels,
+          effort: efforts,
+          personalization_output_mode: outputMode,
+          compact_research: compact,
+          relevance_terms: termList(terms),
+        },
         provider_keys: Object.keys(keys).length ? keys : undefined,
       })
       setKeyEdits({})
@@ -498,6 +524,56 @@ export default function SettingsPage() {
                     </div>
                   ))}
                 </div>
+              </div>
+
+              <div className="mt-5 border-t border-border pt-5">
+                <p className="mb-1 text-sm font-medium">What gets written</p>
+                <p className="hint mb-3 mt-0">
+                  Applies to the next row, no restart. In line-only mode the export has a personalized_line column and
+                  no subject, message or template copy, so your template can live in the sending tool. A row with no
+                  good evidence gets a blank line, never filler.
+                </p>
+                <Field id="output-mode" label="Output" hint="Rows already written keep the format they were written in.">
+                  <Select
+                    id="output-mode"
+                    value={outputMode}
+                    onChange={(e) => setOutputMode(e.target.value as 'full_message' | 'personalized_line')}
+                    className="max-w-sm"
+                  >
+                    <option value="full_message">Full message (from the template)</option>
+                    <option value="personalized_line">Personalised line only (no template)</option>
+                  </Select>
+                </Field>
+                <label className="mt-4 flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={compact}
+                    onChange={(e) => setCompact(e.target.checked)}
+                  />
+                  <span>
+                    Compact research
+                    <span className="block text-xs text-muted-foreground">
+                      Reads about 3,000 characters per source (its most relevant paragraphs) and stops rows whose only
+                      evidence is funding, awards, earnings, partnerships or certifications.
+                    </span>
+                  </span>
+                </label>
+                {compact && (
+                  <Field
+                    id="relevance-terms"
+                    label="Relevant words"
+                    hint="One per line: the platforms, costs and changes your campaign cares about. Paragraphs that use them are kept."
+                  >
+                    <textarea
+                      id="relevance-terms"
+                      className="input h-32 resize-y"
+                      value={terms}
+                      onChange={(e) => setTerms(e.target.value)}
+                      placeholder={'databricks\nsnowflake\ncost\nmigration'}
+                    />
+                  </Field>
+                )}
               </div>
             </div>
           </Card>

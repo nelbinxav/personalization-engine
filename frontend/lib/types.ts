@@ -160,6 +160,9 @@ export interface AppSettings {
     effort: Record<string, string>
     enabled_stages: number[]
     max_tokens: number
+    personalization_output_mode?: 'full_message' | 'personalized_line'
+    compact_research?: boolean
+    relevance_terms?: string[]
   }
   provider_keys: Record<string, string | null>
   enabled_sources: string[]
