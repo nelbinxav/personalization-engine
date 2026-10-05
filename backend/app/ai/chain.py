@@ -970,8 +970,9 @@ async def _run_chain(
                     channel=channel,
                     dossier=dossier,
                     angles=angles_ or [],
-                    # The line alone. An empty body marks "processed, nothing to say".
-                    draft=Draft(body=line, personal_line=line or None),
+                    # The line alone, in its own field. There is no message, so the
+                    # body stays empty; an empty draft means "processed, nothing to say".
+                    draft=Draft(body="", personal_line=line or None),
                     model=model,
                     usage=usage_total,
                     usage_by_stage=usage_by_stage,

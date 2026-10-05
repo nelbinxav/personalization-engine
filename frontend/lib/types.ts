@@ -102,7 +102,11 @@ export interface ProspectRow {
   personalize_error: string | null
   sources: Record<string, boolean>
   subject: string | null
+  /** The full message. Null for a row written in line-only mode. */
   body: string | null
+  /** The personal statement, a column of its own. */
+  personal_line: string | null
+  output_mode: 'full_message' | 'personalized_line'
   angle: string | null
   evidence: string | null
   /** What to do with a personalized row: personalised, generic, hold, or empty. */

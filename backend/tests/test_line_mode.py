@@ -89,7 +89,7 @@ def test_only_the_line_is_written_and_no_template_copy_exists(monkeypatch):
     assert [c[0] for c in calls] == ["DossierOut", "LineOut"]
     p = out.personalization
     assert p.output_mode == "personalized_line"
-    assert p.draft.personal_line == LINE and p.draft.body == LINE and p.draft.subject is None
+    assert p.draft.personal_line == LINE and p.draft.body == "" and p.draft.subject is None
     assert p.fit_established is True and p.angles[0].source_key == "website"
     # Nothing about the template, subject, greeting or ask-first copy reaches the model or the row.
     for _, system, user in calls[1:]:
@@ -124,7 +124,7 @@ def test_the_line_goes_to_its_own_csv_column_and_the_template_is_not_exported(mo
     headers = ["email", "first_name"]
     columns = columns_for("personalized", headers, has_full=False, has_line=True)
     assert columns[:2] == headers and "personalized_line" in columns
-    assert not {"subject", "message", "personal_line", "copy_used"} & set(columns)
+    assert not {"subject", "message", "copy_used"} & set(columns)
     row = row_for("personalized", prospect, headers)
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
@@ -136,9 +136,10 @@ def test_the_line_goes_to_its_own_csv_column_and_the_template_is_not_exported(mo
     assert row["outreach"] == "personalised"
 
 
-def test_full_message_export_is_unchanged():
-    assert "message" in columns_for("personalized", ["a"]) and "personalized_line" not in columns_for("personalized", ["a"])
-    assert columns_for("personalized", ["a"]) == ["a"] + __import__("app.export.csv_writer", fromlist=["x"]).PERSONALIZATION_COLUMNS
+def test_full_message_export_has_the_message_and_the_personal_statement_as_separate_columns():
+    columns = columns_for("personalized", ["a"])
+    assert "message" in columns and "personalized_line" in columns and "personal_line" not in columns
+    assert columns.index("personalized_line") != columns.index("message")
 
 
 # 4 ---------------------------------------------------------------------------
@@ -336,16 +337,17 @@ def test_a_mixed_batch_exports_each_row_by_its_own_mode(monkeypatch):
 
     full, line = full_prospect(), line_prospect(monkeypatch)
     columns = personalization_columns(has_full=True, has_line=True)
-    assert {"subject", "message", "personal_line", "copy_used", "personalized_line"} <= set(columns)
+    assert {"subject", "message", "copy_used", "personalized_line"} <= set(columns)
+    assert "personal_line" not in columns
 
     f = row_for("personalized", full, ["email"])
     assert f["subject"] == "the Ferrari problem" and TEMPLATE_TEXT in f["message"]
-    assert f["personal_line"] == LINE and f["copy_used"] == "main"
-    assert f["outreach"] == "personalised" and "personalized_line" not in f  # nothing claimed for a full row
+    assert f["personalized_line"] == LINE and f["copy_used"] == "main"  # its own column, beside the message
+    assert f["outreach"] == "personalised"
 
     l = row_for("personalized", line, ["email"])
     assert l["personalized_line"] == LINE and l["outreach"] == "personalised"
-    for field in ("subject", "message", "personal_line", "copy_used"):
+    for field in ("subject", "message", "copy_used"):
         assert field not in l  # a line row never carries message fields
     assert TEMPLATE_TEXT not in " ".join(l.values())
 
@@ -369,8 +371,8 @@ def test_columns_follow_the_modes_present_in_the_upload():
     assert personalization_columns(True, False) == PERSONALIZATION_COLUMNS
     assert personalization_columns(False, True) == LINE_COLUMNS
     mixed = personalization_columns(True, True)
-    assert mixed.index("personalized_line") == mixed.index("personal_line") + 1
-    assert [c for c in mixed if c != "personalized_line"] == PERSONALIZATION_COLUMNS
+    assert mixed == PERSONALIZATION_COLUMNS
+    assert PERSONALIZATION_COLUMNS.index("personalized_line") == PERSONALIZATION_COLUMNS.index("message") + 1
 
 
 def test_modes_in_reads_the_stored_modes_not_the_setting(monkeypatch):

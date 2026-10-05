@@ -28,7 +28,7 @@ PERSONALIZATION_COLUMNS = [
     "channel",
     "subject",
     "message",
-    "personal_line",
+    "personalized_line",
     "angle_used",
     "evidence",
     "evidence_source",
@@ -68,9 +68,8 @@ def personalization_columns(has_full: bool = True, has_line: bool = False) -> li
     each row leaves the other mode's columns blank."""
     if has_line and not has_full:
         return LINE_COLUMNS
-    if has_line:
-        at = PERSONALIZATION_COLUMNS.index("personal_line") + 1
-        return PERSONALIZATION_COLUMNS[:at] + [_LINE_ONLY] + PERSONALIZATION_COLUMNS[at:]
+    # Full-message and mixed uploads: the same set, in which the personal
+    # statement and the message are separate columns.
     return PERSONALIZATION_COLUMNS
 
 
@@ -113,12 +112,13 @@ def row_for(kind: str, prospect: Prospect, headers: list[str]) -> dict[str, str]
         line = (draft.personal_line or "") if draft else ""
         # This row's own mode decides, not the current setting.
         line_mode = personalization.output_mode == LINE_MODE
-        if line_mode:
-            row["personalized_line"] = line
-        else:
+        # The personal statement is always its own column; the message is a
+        # second, separate one that exists only for rows that were asked to
+        # write it.
+        row["personalized_line"] = line
+        if not line_mode:
             row["subject"] = (draft.subject or "") if draft else ""
             row["message"] = (draft.body or "") if draft else ""
-            row["personal_line"] = line
         row["angle_used"] = angle.angle if angle else ""
         row["evidence"] = angle.evidence if angle else ""
         row["evidence_source"] = angle.source_key if angle else ""

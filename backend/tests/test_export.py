@@ -134,8 +134,8 @@ def test_the_personal_line_is_exported_on_its_own():
         )
     )
     row = row_for("personalized", prospect, HEADERS)
-    assert row["personal_line"] == "Your post on X."
-    assert "personal_line" in columns_for("personalized", HEADERS)
+    assert row["personalized_line"] == "Your post on X."
+    assert "personalized_line" in columns_for("personalized", HEADERS)
 
 
 def test_outreach_column_says_what_to_do_with_each_row():

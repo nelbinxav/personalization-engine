@@ -529,21 +529,25 @@ export default function SettingsPage() {
               <div className="mt-5 border-t border-border pt-5">
                 <p className="mb-1 text-sm font-medium">What gets written</p>
                 <p className="hint mb-3 mt-0">
-                  Applies to the next row, no restart. In line-only mode the export has a personalized_line column and
-                  no subject, message or template copy, so your template can live in the sending tool. A row with no
-                  good evidence gets a blank line, never filler.
+                  The personal statement is always written, in its own column. The full message is a second, separate
+                  column and is only written when you switch it on. Off, there is no subject, message or template
+                  copy at all, so your template can live in the sending tool. A row with no good evidence gets a blank
+                  statement, never filler. Applies to the next row, no restart. Rows already written keep their format.
                 </p>
-                <Field id="output-mode" label="Output" hint="Rows already written keep the format they were written in.">
-                  <Select
-                    id="output-mode"
-                    value={outputMode}
-                    onChange={(e) => setOutputMode(e.target.value as 'full_message' | 'personalized_line')}
-                    className="max-w-sm"
-                  >
-                    <option value="full_message">Full message (from the template)</option>
-                    <option value="personalized_line">Personalised line only (no template)</option>
-                  </Select>
-                </Field>
+                <label className="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={outputMode === 'full_message'}
+                    onChange={(e) => setOutputMode(e.target.checked ? 'full_message' : 'personalized_line')}
+                  />
+                  <span>
+                    Also write the full message from the template
+                    <span className="block text-xs text-muted-foreground">
+                      Adds the Message column (subject, body, which copy was used). Costs more tokens per row.
+                    </span>
+                  </span>
+                </label>
                 <label className="mt-4 flex items-start gap-2 text-sm">
                   <input
                     type="checkbox"

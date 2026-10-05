@@ -127,8 +127,10 @@ No template, subject, greeting or ask-first copy is read or written: a row with
 nothing to say gets a blank line, never generic copy. The same angle, fit and
 re-ask rules apply, plus code checks that every number is in a research source
 and every proper noun is in the dossier (failing those after the re-ask blanks
-the line). The CSV then has a `personalized_line` column and no
-subject/message/copy_used columns. Read per row; no restart. Each row logs a
+the line). The personal statement is always its own column
+(`personalized_line`, and its own column on the job page); the message is a
+separate column that exists only for full-message rows. Line-only exports have
+no subject/message/copy_used columns, and the line-only draft body is empty. Read per row; no restart. Each row logs a
 `personalization_output` line (counts and tokens only).
 
 **Mixed batches and measurement.** A CSV row is exported by the `output_mode`

@@ -300,7 +300,13 @@ def _prospect_out(doc: dict) -> ProspectOut:
         personalize_error=prospect.personalize_error,
         sources={key: result.ok for key, result in prospect.research.items()},
         subject=personalization.draft.subject if personalization.draft else None,
-        body=personalization.draft.body if personalization.draft else None,
+        body=(
+            personalization.draft.body
+            if personalization.draft and personalization.output_mode != "personalized_line"
+            else None
+        ),
+        personal_line=personalization.draft.personal_line if personalization.draft else None,
+        output_mode=personalization.output_mode,
         angle=angle.angle if angle else None,
         evidence=angle.evidence if angle else None,
         outreach=outreach_of(prospect),

@@ -171,7 +171,11 @@ class ProspectOut(BaseModel):
     # key -> ok, for the status chips in the job detail table
     sources: dict[str, bool] = Field(default_factory=dict)
     subject: str | None = None
+    # The full message. None for a row written in line-only mode.
     body: str | None = None
+    # The personal statement, kept apart from the message.
+    personal_line: str | None = None
+    output_mode: str = "full_message"
     angle: str | None = None
     evidence: str | None = None
     # personalised / generic / hold, see `outreach_of`.

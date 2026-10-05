@@ -126,6 +126,8 @@ export default function JobDetailPage() {
   if (!job) return <Spinner />
 
   const isScrape = job.type === 'scrape'
+  // The message is its own column, shown only when some row was asked to write one.
+  const showMessage = !isScrape && !!rows?.some((r) => r.output_mode !== 'personalized_line')
   const statusOf = (row: ProspectRow) => (isScrape ? row.scrape_status : row.personalize_status)
   const errorOf = (row: ProspectRow) => (isScrape ? row.scrape_error : row.personalize_error)
   const processed = job.counts.done + job.counts.failed + job.counts.skipped
@@ -308,7 +310,8 @@ export default function JobDetailPage() {
               <tr>
                 <th className="w-12">#</th>
                 <th>Prospect</th>
-                <th>{isScrape ? 'What was found' : 'Message'}</th>
+                <th>{isScrape ? 'What was found' : 'Personal statement'}</th>
+                {showMessage && <th>Message</th>}
                 <th>Status</th>
                 <th />
               </tr>
@@ -341,12 +344,9 @@ export default function JobDetailPage() {
                             </Badge>
                           ))}
                         </div>
-                      ) : row.body ? (
+                      ) : row.personal_line ? (
                         <div>
-                          {row.subject && <div className="mb-1 text-sm font-medium">{row.subject}</div>}
-                          <p className={cn('text-sm leading-relaxed text-foreground/90', open ? 'whitespace-pre-wrap' : 'line-clamp-2')}>
-                            {row.body}
-                          </p>
+                          <p className="text-sm leading-relaxed text-foreground/90">{row.personal_line}</p>
                           {open && row.angle && (
                             <div className="mt-3 space-y-1.5 rounded-lg border border-border bg-muted/50 p-3 text-xs">
                               <p>
@@ -360,22 +360,53 @@ export default function JobDetailPage() {
                             </div>
                           )}
                           <div className="mt-1.5 flex flex-wrap items-center gap-1">
-                            <button onClick={() => toggle(row.id)} className="link text-xs">
-                              {open ? 'Show less' : 'Show full message & evidence'}
-                            </button>
-                            <span className="text-xs text-muted-foreground">· {row.body.length} chars</span>
-                            {open && (
-                              <CopyButton
-                                text={row.subject ? `${row.subject}\n\n${row.body}` : row.body}
-                                label="Copy message"
-                              />
+                            {row.angle && (
+                              <button onClick={() => toggle(row.id)} className="link text-xs">
+                                {open ? 'Hide evidence' : 'Show evidence'}
+                              </button>
                             )}
+                            <span className="text-xs text-muted-foreground">· {row.personal_line.length} chars</span>
+                            <CopyButton text={row.personal_line} label="Copy statement" />
                           </div>
                         </div>
                       ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
+                        <span className="text-xs text-muted-foreground">
+                          {row.output_mode === 'personalized_line' ? 'No statement' : '—'}
+                        </span>
                       )}
                     </td>
+
+                    {showMessage && !isScrape && (
+                      <td className="w-full max-w-xl">
+                        {row.body ? (
+                          <div>
+                            {row.subject && <div className="mb-1 text-sm font-medium">{row.subject}</div>}
+                            <p
+                              className={cn(
+                                'text-sm leading-relaxed text-foreground/90',
+                                open ? 'whitespace-pre-wrap' : 'line-clamp-2',
+                              )}
+                            >
+                              {row.body}
+                            </p>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                              <button onClick={() => toggle(row.id)} className="link text-xs">
+                                {open ? 'Show less' : 'Show full message'}
+                              </button>
+                              <span className="text-xs text-muted-foreground">· {row.body.length} chars</span>
+                              {open && (
+                                <CopyButton
+                                  text={row.subject ? `${row.subject}\n\n${row.body}` : row.body}
+                                  label="Copy message"
+                                />
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </td>
+                    )}
 
                     <td>
                       {!isScrape && row.outreach ? (
