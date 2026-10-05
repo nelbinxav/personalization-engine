@@ -656,6 +656,23 @@ def slot_window(template_body: str) -> str:
     return ""
 
 
+LINE_FOLLOWS_NOTE = """
+
+WHAT FOLLOWS YOUR LINE (read only)
+The message that follows is already written. {{personalization}} marks where your line goes. Lead into it. Never repeat, reword or answer what it says, never ask its question, and write none of it.
+"""
+
+
+def line_following(template: Template) -> str:
+    """The lines of the template around its slot, for line-only mode. Empty when
+    the template has no slot, so a template without one changes nothing."""
+    copies = [("Copy used when they run the platform", template.body)]
+    if template.fallback_body.strip():
+        copies.append(("Copy used when that is not established", template.fallback_body))
+    blocks = [f"{label}:\n{slot_window(copy)}" for label, copy in copies if slot_window(copy)]
+    return LINE_FOLLOWS_NOTE + "\n\n".join(blocks) if blocks else ""
+
+
 def can_combine(template: Template) -> bool:
     """The merged call writes only the slot and the code picks the copy after,
     so every copy a row can get must have a slot."""
@@ -999,6 +1016,10 @@ async def _run_chain(
         if not _OFFER_TOKEN.search(line_rules):
             line_rules += "\nWHAT WE SELL\n{{offer_context}}"
         system_text, cacheable = _split_stable(line_rules, base_context)
+        # What the template puts right after the line, so the two join up. Read
+        # only: the model is told not to write, repeat or answer it. Same for
+        # every row that uses this template, so it stays cacheable.
+        system_text += line_following(template)
         user_text = prospect_block(identity, dossier=dossier_text)
         prospect_details = " ".join([identity.display_name, identity.title or "", identity.company or ""])
         dossier_pool = " ".join([dossier.summary, *(f.text for f in dossier.facts)])

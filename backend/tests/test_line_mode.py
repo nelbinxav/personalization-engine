@@ -93,8 +93,9 @@ def test_only_the_line_is_written_and_no_template_copy_exists(monkeypatch):
     assert p.fit_established is True and p.angles[0].source_key == "website"
     # Nothing about the template, subject, greeting or ask-first copy reaches the model or the row.
     for _, system, user in calls[1:]:
-        assert "masterclass" not in system + user and "Ferrari" not in system + user
-        assert "{{personalization}}" not in system
+        # The subject is never shown. Only the lines around the slot are.
+        assert "Ferrari" not in system + user and "Subject" not in system + user
+        assert "WHAT FOLLOWS YOUR LINE" in system and "Do you run Databricks?" in system
     assert "We cut Databricks bills." in calls[1][1]
     assert TEMPLATE_TEXT not in p.draft.body and not p.ask_first
 
@@ -400,3 +401,28 @@ def test_modes_in_reads_the_stored_modes_not_the_setting(monkeypatch):
     assert modes([{"generated": True}]) == (True, False)  # written before output_mode existed
     assert modes([{"generated": True}, {"generated": True, "mode": "personalized_line"}]) == (True, True)
     assert modes([{"generated": False}, {"generated": True, "mode": "personalized_line"}]) == (False, True)
+
+
+def test_the_lines_after_the_slot_are_shown_read_only_and_nothing_more(monkeypatch):
+    from app.ai.chain import line_following
+
+    long_body = "Subject: s\n\nHi {{identity.first_name}},\n\n{{personalization}}\n\nQuick question: do you run Databricks?\n\nIf so, we cut that bill.\n\nThe far end of the email that is never shown.\n\nBest"
+    template = Template(channel=Channel.email, name="t", body=long_body)
+    text = line_following(template)
+    assert "do you run Databricks?" in text and "If so, we cut that bill." in text
+    assert "Hi {{identity.first_name}}," in text  # the line before the slot, for the join
+    assert "never shown" not in text and "Subject" not in text
+    assert "write none of it" in text
+
+
+def test_a_template_without_a_slot_adds_nothing():
+    from app.ai.chain import line_following
+
+    assert line_following(Template(channel=Channel.email, name="t", body="Hi {{identity.first_name}}")) == ""
+
+
+def test_the_following_text_is_the_same_for_every_row_so_it_stays_cacheable(monkeypatch):
+    out, calls = run(monkeypatch, GOOD)
+    first = calls[1][1]
+    out, calls = run(monkeypatch, GOOD)
+    assert calls[1][1] == first
