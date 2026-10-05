@@ -951,6 +951,9 @@ async def _run_chain(
                 cost_usd=cost_of(usage_total),
                 template_version=template.version,
                 fit_established=False,
+                output_mode=(
+                    OutputMode.personalized_line.value if line_mode else OutputMode.full_message.value
+                ),
             ),
             thin_context=True,
             hold=True,

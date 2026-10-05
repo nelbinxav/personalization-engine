@@ -269,6 +269,9 @@ def test_a_real_contact_issue_still_holds_the_row_with_no_line(monkeypatch):
     out, calls = run(monkeypatch, GOOD, d=dossier(issue="She left the company in June."))
     assert out.hold and [c[0] for c in calls] == ["DossierOut"]
     assert out.personalization.draft is None and status_of(out) is RowStatus.needs_review
+    # Held rows are stored in the mode they ran in, so they export and count correctly.
+    assert out.personalization.output_mode == "personalized_line"
+    assert out.personalization.metrics.get("output_mode", "personalized_line") == "personalized_line"
     assert row_for("personalized", prospect_of(out, RowStatus.needs_review), ["email"])["outreach"] == "hold"
 
 
