@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +27,8 @@ class Fact(BaseModel):
 
     text: str
     source_key: str
+    # What the item is (own_post, repost, tech_uses, ...). Empty on older rows.
+    kind: str = ""
 
 
 class Dossier(BaseModel):
@@ -102,6 +105,13 @@ class Personalization(BaseModel):
     fit_evidence: str | None = None
     # True when the template's ask-first copy was used instead of the main copy.
     ask_first: bool = False
+    # "personalized_line" when only the line was written (no message, no template
+    # copy). Rows written before this existed read as full messages.
+    output_mode: str = "full_message"
+    # Per-row counts and flags for comparing configurations (tokens, retries,
+    # whether stage 4 ran). Only written when line mode or compact research is
+    # on; never holds text. See chain.run_chain and scripts/summarize_test.py.
+    metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 class Prospect(Doc):
@@ -114,6 +124,11 @@ class Prospect(Doc):
     researched_at: datetime | None = None
     scrape_status: RowStatus = RowStatus.pending
     scrape_error: str | None = None
+    # Research did not wait for LinkedIn: these sources are still to be read by
+    # the background check (worker/linkedin_backfill.py), oldest request first.
+    linkedin_pending: bool = False
+    linkedin_pending_keys: list[str] = Field(default_factory=list)
+    linkedin_pending_at: datetime | None = None
 
     personalization: Personalization = Field(default_factory=Personalization)
     personalize_status: RowStatus = RowStatus.pending
@@ -132,6 +147,13 @@ def outreach_of(prospect: "Prospect") -> str:
     status = prospect.personalize_status
     if status in (RowStatus.pending, RowStatus.queued, RowStatus.running, RowStatus.skipped):
         return ""
+    if prospect.personalization.output_mode == "personalized_line":
+        # No message exists in this mode: the line, or nothing. A blank line is
+        # sent without personalization; only a contact in doubt is held.
+        if status in (RowStatus.failed, RowStatus.needs_review):
+            return "hold"
+        draft = prospect.personalization.draft
+        return "personalised" if draft and (draft.personal_line or "").strip() else "generic"
     draft = prospect.personalization.draft
     if status in (RowStatus.failed, RowStatus.needs_review) or not draft or not draft.body.strip():
         return "hold"

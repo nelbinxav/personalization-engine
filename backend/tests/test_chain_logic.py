@@ -13,6 +13,7 @@ from app.ai.chain import (
     fixed_draft,
     format_fit,
     format_research,
+    funnel_view,
     generic_draft,
     has_usable_research,
     render,
@@ -20,7 +21,7 @@ from app.ai.chain import (
     split_subject,
     stage_model,
 )
-from app.ai.schemas import AnglesOut, DossierOut, DraftOut, strict_schema
+from app.ai.schemas import AnglesOut, DossierOut, DraftOut, FinalOut, strict_schema
 from app.models.prompt import Stage
 from app.models.prospect import Draft, SourceResult
 from app.models.settings import AppSettings
@@ -183,7 +184,7 @@ def test_strict_schema_inlines_refs_and_closes_objects():
     # FactOut was a $ref before inlining.
     fact = schema["properties"]["facts"]["items"]
     assert fact["additionalProperties"] is False
-    assert set(fact["required"]) == {"text", "source_key"}
+    assert set(fact["required"]) == {"text", "source_key", "kind"}
 
 
 def test_strict_schema_handles_optional_fields():
@@ -299,7 +300,7 @@ def test_each_stage_can_run_on_its_own_model():
     assert stage_model(settings, Stage.draft) == "claude-sonnet-5-5"
 
 
-def _run_with_fake_stages(monkeypatch, dossier: dict, prompts: dict | None = None):
+def _run_with_fake_stages(monkeypatch, dossier: dict, prompts: dict | None = None, final=None, research=None):
     """Run the chain with Claude replaced by canned stage outputs, recording
     which schema (stage) was asked for and the system prompt it got."""
     from app.ai import chain
@@ -308,11 +309,14 @@ def _run_with_fake_stages(monkeypatch, dossier: dict, prompts: dict | None = Non
     from app.models.settings import CredentialMode
 
     calls: list[tuple[str, str]] = []
+    finals = list(final) if isinstance(final, list) else [final]
 
     async def fake_call_stage(client, *, system_text, schema_model, **kwargs):
         calls.append((schema_model.__name__, system_text))
         if schema_model is DossierSchema:
             parsed = dossier
+        elif schema_model is FinalOut:
+            parsed = finals.pop(0) if len(finals) > 1 else finals[0]
         elif schema_model is Angles:
             parsed = {"angles": [], "sufficient": False, "reason": "nothing", "fit_established": False, "fit_evidence": ""}
         else:
@@ -322,12 +326,13 @@ def _run_with_fake_stages(monkeypatch, dossier: dict, prompts: dict | None = Non
     monkeypatch.setattr(chain, "call_stage", fake_call_stage)
     settings = AppSettings(offer_context="We cut Databricks bills.")
     settings.ai.mode = CredentialMode.claude_code
+    settings.ai.combined_final = final is not None
     out = asyncio.run(
         run_chain(
             identity=Identity(first_name="Ada", company="Analytical"),
             raw={},
-            research={"website": SourceResult(key="website", ok=True, content="About us.")},
-            prompts=prompts or {1: "extract", 2: "pick angles", 3: "write"},
+            research=research or {"website": SourceResult(key="website", ok=True, content="About us.")},
+            prompts=prompts or {1: "extract", 2: "pick angles", 3: "write", 4: "final"},
             template=_template(fallback_body=ASK_FIRST),
             settings=settings,
             channel=Channel.email,
@@ -337,7 +342,7 @@ def _run_with_fake_stages(monkeypatch, dossier: dict, prompts: dict | None = Non
 
 
 def test_no_signal_in_the_dossier_skips_the_angle_stage(monkeypatch):
-    dossier = {"summary": "A bakery.", "facts": [], "recent_events": [], "tech_signals": [],
+    dossier = {"summary": "A bakery.", "facts": [], "contact_issue": "",
                "has_signal": False, "signal_note": "Only company history."}
     out, calls = _run_with_fake_stages(monkeypatch, dossier)
     assert [name for name, _ in calls] == ["DossierOut"]
@@ -347,27 +352,120 @@ def test_no_signal_in_the_dossier_skips_the_angle_stage(monkeypatch):
 
 
 def test_a_dossier_with_signal_still_goes_to_the_angle_stage(monkeypatch):
-    dossier = {"summary": "A data company.", "facts": [], "recent_events": [],
-               "tech_signals": [{"text": "Runs Databricks", "source_key": "website"}],
+    dossier = {"summary": "A data company.", "contact_issue": "",
+               "facts": [{"text": "Runs Databricks", "source_key": "website", "kind": "tech_uses"}],
                "has_signal": True, "signal_note": "Stack signal."}
-    _, calls = _run_with_fake_stages(monkeypatch, dossier)
+    _, calls = _run_with_fake_stages(monkeypatch, dossier, research=WEBSITE_DATABRICKS)
     assert [name for name, _ in calls] == ["DossierOut", "AnglesOut"]
 
 
+def test_a_fact_its_source_does_not_support_is_dropped_and_ends_the_row(monkeypatch):
+    dossier = {"summary": "s", "contact_issue": "", "has_signal": True, "signal_note": "",
+               "facts": [{"text": "Runs Databricks", "source_key": "website", "kind": "tech_uses"}]}
+    out, calls = _run_with_fake_stages(monkeypatch, dossier)  # the website says only "About us."
+    assert [name for name, _ in calls] == ["DossierOut"]
+    assert out.thin_context and "failed the check" in out.reason
+    assert any("Dropped 1" in w for w in out.warnings)
+
+
 def test_the_angle_stage_always_sees_the_offer(monkeypatch):
-    dossier = {"summary": "s", "facts": [], "recent_events": [], "tech_signals": [], "has_signal": True, "signal_note": ""}
+    dossier = {"summary": "s", "facts": [], "contact_issue": "", "has_signal": True, "signal_note": ""}
     # A prompt that never places the offer gets it appended...
     _, calls = _run_with_fake_stages(monkeypatch, dossier)
     assert calls[1][1].endswith("WHAT WE SELL\nWe cut Databricks bills.")
     # ...and one that places it is left alone.
-    _, calls = _run_with_fake_stages(monkeypatch, dossier, {1: "x", 2: "Offer: {{offer_context}}. Pick.", 3: "w"})
+    _, calls = _run_with_fake_stages(monkeypatch, dossier, {1: "x", 2: "Offer: {{offer_context}}. Pick.", 3: "w", 4: "f"})
     assert calls[1][1] == "Offer: We cut Databricks bills.. Pick."
 
 
 def test_a_contact_issue_stops_the_row_with_no_copy_at_all(monkeypatch):
-    dossier = {"summary": "s", "facts": [], "recent_events": [], "tech_signals": [], "has_signal": True,
+    dossier = {"summary": "s", "facts": [], "has_signal": True,
                "signal_note": "", "contact_issue": "The sources call her the company's late founder."}
     out, calls = _run_with_fake_stages(monkeypatch, dossier)
     assert [name for name, _ in calls] == ["DossierOut"]
     assert out.hold and out.personalization.draft is None
     assert "late founder" in out.reason
+
+
+def test_the_model_reads_only_the_best_material_found():
+    def src(key, ok=True):
+        return SourceResult(key=key, ok=ok, content="text" if ok else None)
+
+    everything = {k: src(k) for k in ("website", "news", "podcasts", "linkedin_profile", "linkedin_posts")}
+    assert set(funnel_view(everything)) == {"linkedin_posts", "linkedin_profile"}
+    # No recent post: a podcast is next.
+    no_post = {**everything, "linkedin_posts": src("linkedin_posts", ok=False)}
+    assert set(funnel_view(no_post)) == {"podcasts", "linkedin_profile"}
+    # Neither: everything else is read.
+    neither = {**no_post, "podcasts": src("podcasts", ok=False)}
+    assert funnel_view(neither) == neither
+
+
+WEBSITE_DATABRICKS = {
+    "website": SourceResult(
+        key="website", ok=True, content="Acme runs its data platform on Databricks and hired 40 engineers."
+    )
+}
+USES = {"text": "Acme runs its data platform on Databricks", "source_key": "website", "kind": "tech_uses"}
+TALKS = {"text": "Acme wrote about Databricks", "source_key": "website", "kind": "tech_talks"}
+GOOD_DOSSIER = {"summary": "A data company.", "contact_issue": "", "has_signal": True,
+                "signal_note": "stack", "facts": [USES]}
+GOOD_FINAL = {
+    "angles": [{"angle": "Runs Databricks", "evidence": "Acme runs its data platform on Databricks",
+                "source_key": "news"}],
+    "sufficient": True, "reason": "", "fit_established": True,
+    "fit_evidence": "Acme runs its data platform on Databricks",
+    "personalization": "Running the platform on Databricks usually means compute you do not control.",
+    "subject": None,
+}
+
+
+def test_stages_two_and_three_are_one_call_when_combined(monkeypatch):
+    out, calls = _run_with_fake_stages(monkeypatch, GOOD_DOSSIER, final=GOOD_FINAL, research=WEBSITE_DATABRICKS)
+    assert [name for name, _ in calls] == ["DossierOut", "FinalOut"]
+    p = out.personalization
+    assert not out.thin_context and p.fit_established and not p.ask_first
+    assert "Running the platform on Databricks" in p.draft.body
+    # The cited source is the item's real one, not the model's guess ("news").
+    assert p.angles[0].source_key == "website"
+    # The offer reaches the model once, and the slot rules come after rendering.
+    system = calls[1][1]
+    assert system.count("We cut Databricks bills.") == 1 and "SLOT" in system
+
+
+def test_combined_call_drops_an_angle_whose_evidence_is_not_in_the_dossier(monkeypatch):
+    final = {**GOOD_FINAL, "angles": [{"angle": "x", "evidence": "Acme opened an office in Lisbon",
+                                       "source_key": "website"}]}
+    out, calls = _run_with_fake_stages(monkeypatch, GOOD_DOSSIER, final=final, research=WEBSITE_DATABRICKS)
+    assert out.thin_context and out.personalization.angles == []
+    # No model-written text goes out: the ask-first copy, since fit was not shown here.
+    assert "Lisbon" not in out.personalization.draft.body
+
+
+def test_fit_needs_a_tech_uses_item(monkeypatch):
+    dossier = {**GOOD_DOSSIER, "facts": [TALKS]}
+    research = {"website": SourceResult(key="website", ok=True, content="Acme wrote about Databricks.")}
+    final = {**GOOD_FINAL, "angles": [{"angle": "x", "evidence": TALKS["text"], "source_key": "website"}],
+             "fit_evidence": TALKS["text"], "personalization": "Acme writes about Databricks."}
+    out, _ = _run_with_fake_stages(monkeypatch, dossier, final=final, research=research)
+    # The model wrote its line assuming fit, but "wrote about" cannot show it.
+    assert out.thin_context and out.personalization.ask_first
+    assert out.personalization.fit_established is False
+    assert "Acme writes" not in out.personalization.draft.body
+
+
+def test_an_invented_number_triggers_one_re_ask(monkeypatch):
+    bad = {**GOOD_FINAL, "personalization": "Acme hired 400 engineers on Databricks."}
+    out, calls = _run_with_fake_stages(
+        monkeypatch, GOOD_DOSSIER, final=[bad, GOOD_FINAL], research=WEBSITE_DATABRICKS
+    )
+    assert [name for name, _ in calls] == ["DossierOut", "FinalOut", "FinalOut"]
+    assert "400" not in out.personalization.draft.body and not out.personalization.constraint_warning
+
+
+def test_a_template_without_a_slot_keeps_the_three_call_chain(monkeypatch):
+    from app.ai.chain import can_combine
+
+    assert can_combine(_template(fallback_body=ASK_FIRST))
+    assert not can_combine(Template(channel=Channel.email, name="t", body="Hi {{identity.first_name}}"))
+    assert not can_combine(_template(fallback_body="Plain ask, no slot."))

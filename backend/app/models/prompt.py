@@ -9,12 +9,15 @@ class Stage(IntEnum):
     dossier = 1
     angle = 2
     draft = 3
+    # Stages 2 and 3 in one call; used instead of them when ai.combined_final is on.
+    final = 4
 
 
 STAGE_LABELS = {
     Stage.dossier: "Dossier - condense scraped context into tagged facts",
     Stage.angle: "Angle - pick personalization angles, each citing a fact",
     Stage.draft: "Draft - write the message into the template",
+    Stage.final: "Final - angles, fit and the message in one call (replaces 2 and 3)",
 }
 
 

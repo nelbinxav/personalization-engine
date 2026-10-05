@@ -1,63 +1,87 @@
-"""Structured-output schemas for the three stages.
+"""Structured-output schemas for the chain's stages.
 
 These are passed to `client.messages.parse(output_format=...)`, so the worker
 never parses prose and a malformed generation surfaces as a validation error
 rather than as a corrupt CSV cell.
 """
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
+FactKind = Literal[
+    "own_post", "repost", "podcast", "tech_uses", "tech_sells", "tech_talks", "event", "other"
+]
+
+
 class FactOut(BaseModel):
-    text: str = Field(description="One specific, verifiable fact about the prospect or company.")
-    source_key: str = Field(
-        description="Which source this came from, exactly as its '### source:' heading names "
-        "it, for example linkedin_posts, podcasts, linkedin_profile, linkedin_company, news, "
-        "website or rss."
-    )
+    text: str
+    source_key: str
+    kind: FactKind
 
 
 class DossierOut(BaseModel):
-    """Stage 1."""
+    """Stage 1. Descriptions are kept out of the schema because the schema is
+    re-sent on every call; the rules live in the cached stage 1 prompt."""
 
-    summary: str = Field(description="Two or three sentences on who this company is and what they do.")
-    facts: list[FactOut] = Field(default_factory=list, description="Durable facts.")
-    recent_events: list[FactOut] = Field(
-        default_factory=list,
-        description="Things that happened recently: funding, launches, hires, press, posts.",
-    )
-    tech_signals: list[FactOut] = Field(
-        default_factory=list,
-        description="Technology, tooling or platform signals visible in the sources.",
-    )
-    contact_issue: str = Field(
-        default="",
-        description="If the sources show this person should not be contacted as addressed, "
-        "say why in one sentence: they have died, they have left this company, or the "
-        "company has closed or been absorbed into another. Otherwise an empty string. Do "
-        "not guess: it needs a source that says so.",
-    )
-    has_signal: bool = Field(
-        description="True if at least one item could matter to what we sell, or is something "
-        "the prospect said themselves about their work. False only when every item is "
-        "unrelated or nothing reliable was found. When unsure, true: false ends the work on "
-        "this prospect."
-    )
-    signal_note: str = Field(
-        default="", description="One short sentence giving the reason for has_signal."
-    )
+    summary: str
+    facts: list[FactOut]
+    contact_issue: str
+    has_signal: bool
+    signal_note: str
+
+
+# With ai.compact_research on, stage 1 also labels the items that are kept as
+# facts but cannot by themselves make has_signal true. See chain.WEAK_KINDS.
+WeakKind = Literal["funding", "award", "earnings", "partnership", "customer_stack", "certification"]
+WEAK_KINDS = frozenset(WeakKind.__args__)
+FactKindStrict = Literal[
+    "own_post", "repost", "podcast", "tech_uses", "tech_sells", "tech_talks", "event", "other",
+    "funding", "award", "earnings", "partnership", "customer_stack", "certification",
+]
+
+
+class FactStrictOut(FactOut):
+    kind: FactKindStrict
+
+
+class DossierStrictOut(DossierOut):
+    facts: list[FactStrictOut]
 
 
 class AngleOut(BaseModel):
-    angle: str = Field(description="The personalization angle, in one sentence.")
-    evidence: str = Field(
-        description="The exact fact from the dossier this rests on. Quote it; do not paraphrase "
-        "into something the sources do not support."
-    )
-    source_key: str = Field(description="Which source the evidence came from.")
+    angle: str
+    evidence: str
+    source_key: str
+
+
+class FinalOut(BaseModel):
+    """Stages 2 and 3 in one call, for a template with a {{personalization}} slot.
+    The model writes only the slot; the code places it in the approved copy."""
+
+    angles: list[AngleOut]
+    sufficient: bool
+    reason: str
+    fit_established: bool
+    fit_evidence: str
+    personalization: str
+    subject: str | None
+
+
+class LineOut(BaseModel):
+    """Stage 4 in ai.personalization_output_mode = "personalized_line": the same
+    judgement as FinalOut, but the only copy written is the one line."""
+
+    angles: list[AngleOut]
+    sufficient: bool
+    reason: str
+    fit_established: bool
+    fit_evidence: str
+    personalized_line: str
 
 
 class AnglesOut(BaseModel):
-    """Stage 2."""
+    """Stage 2 (three-call chain)."""
 
     angles: list[AngleOut] = Field(
         default_factory=list,

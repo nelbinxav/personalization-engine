@@ -30,7 +30,7 @@ interface Usage {
 }
 
 const WINDOW_LABEL: Record<string, string> = { five_hour: '5-hour window', seven_day: 'Weekly window' }
-const STAGE_LABEL: Record<string, string> = { '1': 'Gather facts', '2': 'Choose the angle', '3': 'Write the message' }
+const STAGE_LABEL: Record<string, string> = { '1': 'Gather facts', '2': 'Choose the angle', '3': 'Write the message', '4': 'Angle and message' }
 
 function compact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`

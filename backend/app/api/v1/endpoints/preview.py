@@ -45,12 +45,14 @@ async def preview(payload: PreviewRequest) -> dict:
         template = template.model_copy(update={"fallback_body": payload.fallback_body})
 
     prompts: dict[int, str] = {}
-    for stage in (1, 2, 3):
+    for stage in (1, 2, 3, 4):
         override = payload.prompt_bodies.get(str(stage))
         if override:
             prompts[stage] = override
             continue
         doc = await mongo.prompts().find_one({"stage": stage, "is_active": True})
+        if not doc and stage == 4:
+            continue
         if not doc:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST, f"No active prompt for stage {stage}."

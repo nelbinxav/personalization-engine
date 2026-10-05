@@ -28,16 +28,16 @@ from app.db import mongo
 from app.models.common import Channel, RowStatus, utcnow
 from app.models.prospect import Prospect
 from app.models.template import Template
-from app.sources import linkedin_account, registry
+from app.sources import registry
 from app.worker import bookkeeping, limiter
 
 logger = logging.getLogger(__name__)
 
 # Attempts per row, counting the first. arq's `max_tries` is set from this.
 MAX_TRIES = 5
-# Upper bounds on the work itself, well under arq's job_timeout, so a hung row
+# Upper bound on the work itself, well under arq's job_timeout, so a hung row
 # is marked failed here instead of being killed where nothing can record it.
-SCRAPE_TIMEOUT = 8 * 60
+# (Research times each of its steps instead: see registry.STEP_TIMEOUT.)
 PERSONALIZE_TIMEOUT = 25 * 60
 # How long the job waits when Claude rate-limits a row on every attempt.
 RATE_LIMIT_PAUSE = timedelta(minutes=10)
@@ -60,32 +60,19 @@ async def _set_status(prospect_id: str, field: str, status: RowStatus) -> None:
 
 
 async def scrape_prospect(ctx: dict, job_id: str, prospect_id: str) -> str:
-    """Fetch every enabled source for one prospect."""
-    # Checked before waiting for a slot so a cancelled job drains quickly.
+    """Research one prospect (see `registry.run_funnel`).
+
+    No row slot is held for the whole task. The funnel takes one only around
+    the fetches that do work, so a prospect waiting for its turn on LinkedIn
+    does not stop other prospects being researched in the meantime.
+    """
+    # Checked first so a cancelled job drains quickly.
     if not await bookkeeping.job_is_active(job_id):
         return "cancelled"
-
-    job = await mongo.jobs().find_one({"_id": job_id}, {"options.sources": 1})
-    settings = await settings_store.load()
-    sources = ((job or {}).get("options") or {}).get("sources") or []
-    if settings.linkedin_provider == "account" and any(k.startswith("linkedin_") for k in sources):
-        # LinkedIn is read slowly and one page at a time. These rows queue for
-        # their turn here, outside the row slots, so they do not hold up rows
-        # that have nothing to do with LinkedIn.
-        _, longest_gap = linkedin_account.read_gap(settings.linkedin_reads_per_hour)
-        timeout = SCRAPE_TIMEOUT + 2 * (longest_gap + linkedin_account.TOOL_TIMEOUT)
-        async with limiter.linkedin_row:
-            async with limiter.rows.slot():
-                return await _scrape(ctx, job_id, prospect_id, timeout)
-
-    async with limiter.rows.slot():
-        return await _scrape(ctx, job_id, prospect_id, SCRAPE_TIMEOUT)
+    return await _scrape(ctx, job_id, prospect_id)
 
 
-async def _scrape(ctx: dict, job_id: str, prospect_id: str, timeout: float) -> str:
-    if not await bookkeeping.job_is_active(job_id):
-        return "cancelled"
-
+async def _scrape(ctx: dict, job_id: str, prospect_id: str) -> str:
     await bookkeeping.mark_started(job_id)
 
     job = await mongo.jobs().find_one({"_id": job_id})
@@ -102,22 +89,9 @@ async def _scrape(ctx: dict, job_id: str, prospect_id: str, timeout: float) -> s
 
     try:
         cfg = await registry.build_config()
-        results = await asyncio.wait_for(
-            registry.run_sources(prospect.identity, source_keys, cfg, use_cache),
-            timeout=timeout,
+        results, linkedin_later = await registry.run_funnel(
+            prospect.identity, source_keys, cfg, use_cache, busy=limiter.rows.slot
         )
-    except asyncio.TimeoutError:
-        await mongo.prospects().update_one(
-            {"_id": prospect_id},
-            {
-                "$set": {
-                    "scrape_status": RowStatus.failed.value,
-                    "scrape_error": f"Research took longer than {int(timeout // 60)} minutes.",
-                }
-            },
-        )
-        await bookkeeping.record_row(job_id, "failed")
-        return "failed"
     except Exception as exc:  # noqa: BLE001 - the registry already isolates per source
         logger.exception("Scrape crashed for prospect %s", prospect_id)
         await mongo.prospects().update_one(
@@ -127,22 +101,30 @@ async def _scrape(ctx: dict, job_id: str, prospect_id: str, timeout: float) -> s
         await bookkeeping.record_row(job_id, "failed")
         return "failed"
 
-    # Our own daily cap for a provider is spent (the LinkedIn account). Nothing
-    # more will work today, so the job waits for tomorrow instead of finishing
-    # the sheet without that source. What this row did fetch is cached.
-    capped = next((r for r in results.values() if r.meta.get("daily_limit")), None)
-    if capped:
-        await _set_status(prospect_id, "scrape_status", RowStatus.queued)
-        tomorrow = (utcnow() + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
-        await bookkeeping.pause_job(job_id, capped.error or "Daily limit reached.", tomorrow)
-        return "paused"
+    # LinkedIn that could not be read this instant is left for the background
+    # check; the row carries on with what it has.
+    later = {
+        "linkedin_pending": bool(linkedin_later),
+        "linkedin_pending_keys": linkedin_later,
+        "linkedin_pending_at": utcnow() if linkedin_later else None,
+    }
 
-    # A provider asked us to slow down: try the row again later. The sources
-    # that worked are cached, so only the limited ones are fetched again.
-    attempt = ctx.get("job_try", 1)
-    if attempt < MAX_TRIES and any(r.meta.get("rate_limited") for r in results.values()):
-        await _set_status(prospect_id, "scrape_status", RowStatus.queued)
-        raise Retry(defer=retry_delay(attempt))
+    if not results and linkedin_later:
+        # Only LinkedIn applies to this row, and its turn has not come yet.
+        await mongo.prospects().update_one(
+            {"_id": prospect_id},
+            {
+                "$set": {
+                    "research": {},
+                    "researched_at": utcnow(),
+                    "scrape_status": RowStatus.done.value,
+                    "scrape_error": "Waiting for the LinkedIn check, which runs in the background.",
+                    **later,
+                }
+            },
+        )
+        await bookkeeping.record_row(job_id, "done")
+        return "done"
 
     if not results:
         # Nothing applied to this row -- no website, no LinkedIn. Not a failure.
@@ -173,6 +155,7 @@ async def _scrape(ctx: dict, job_id: str, prospect_id: str, timeout: float) -> s
                 # the four that worked.
                 "scrape_status": (RowStatus.done if any_ok else RowStatus.failed).value,
                 "scrape_error": "; ".join(errors) if errors else None,
+                **later,
             }
         },
     )
@@ -246,13 +229,15 @@ async def _personalize(ctx: dict, job_id: str, prospect_id: str) -> str:
     template = Template.model_validate(template_doc)
 
     prompts: dict[int, str] = {}
-    for stage in (1, 2, 3):
+    for stage in (1, 2, 3, 4):
         prompt_id = (options.get("prompt_ids") or {}).get(str(stage))
         doc = None
         if prompt_id:
             doc = await mongo.prompts().find_one({"_id": prompt_id})
         if not doc:
             doc = await mongo.prompts().find_one({"stage": stage, "is_active": True})
+        if not doc and stage == 4:
+            continue  # optional: without it the row takes the three-call chain
         if not doc:
             return await fail(f"No active prompt for stage {stage}.")
         prompts[stage] = doc["body"]

@@ -80,7 +80,68 @@ the row counted or back in the queue.
 The frontend's `JobWatcher` (in the app layout) raises a notice, and a browser
 notification when allowed, as jobs finish or pause.
 
-### The three-stage chain (`app/ai/chain.py`)
+### The chain (`app/ai/chain.py`)
+
+Two calls per row for a slot template: stage 1, then stage 4 (angles, fit and
+the slot line in one call, `ai.combined_final`, on by default). The three-call
+chain below still runs for a template with no `{{personalization}}` slot (the
+copy is chosen from fit, so a full-body message cannot be written before fit is
+known), when stage 1 is off, or when there is no active stage 4 prompt. Set
+`ai.combined_final` false and reactivate the old stage 1 prompt to roll back.
+The code, not the model, checks the claims (`app/ai/grounding.py`): each fact
+against its source text, each angle and the fit evidence against a dossier item
+(fit also needs a `tech_uses` item), and the written line for invented digits,
+banned wording and naming its source. A failed check drops the angle, denies
+fit or discards the line; none of them costs a call. The slot window sent to the
+model is only the lines around `{{personalization}}`, not the template.
+
+### Compact research (`ai.compact_research`, off by default)
+
+One switch in Settings (`ai.compact_research`, with `ai.compact_chars_per_source`
+= 3000 and the campaign's `ai.relevance_terms`) for two token savings:
+
+- **Research:** each source is cut to about 3000 characters by keeping its
+  highest-scoring paragraphs, in their original order (`research_select.py`),
+  instead of the first 6000 characters. Scores come from the campaign's terms,
+  names of the person and company, dates, events, named things and sentence
+  length; cookie, legal and menu text is scored down. Recent posts are never cut.
+  No terms means generic signals only. The campaign vocabulary lives in
+  Settings, never in code.
+- **Stage 1 signal:** stage 1 labels items `funding`, `award`, `earnings`,
+  `partnership`, `customer_stack` or `certification` (`DossierStrictOut`, with
+  a note appended to the stage 1 prompt). They stay in the dossier, but
+  `strict_signal` sets `has_signal` false when they are all there is, so the
+  row stops before stage 4. `tech_*`, `repost`, `own_post`, `podcast` and
+  `event` are unchanged. A `contact_issue` still stops the row first, and a
+  literal `""`/"none" in it no longer counts as one.
+
+Off, a row runs exactly as before. When on, each row logs one `compact_research`
+line (sizes, stage 1 tokens, whether stage 4 ran, total tokens; never the text).
+
+### Line-only output (`ai.personalization_output_mode`, temporary)
+
+`"full_message"` (default) is everything above. `"personalized_line"` runs
+stage 1, then one stage 4 call (`LINE_PROMPT` in `line_prompt.py`, `LineOut`)
+that writes only the line for a template that lives in the sending platform.
+No template, subject, greeting or ask-first copy is read or written: a row with
+nothing to say gets a blank line, never generic copy. The same angle, fit and
+re-ask rules apply, plus code checks that every number is in a research source
+and every proper noun is in the dossier (failing those after the re-ask blanks
+the line). The CSV then has a `personalized_line` column and no
+subject/message/copy_used columns. Read per row; no restart. Each row logs a
+`personalization_output` line (counts and tokens only).
+
+**Mixed batches and measurement.** A CSV row is exported by the `output_mode`
+stored on it, never by the current setting; an upload holding both kinds gets
+both column sets. With line mode or compact research on, each row stores
+`personalization.metrics` (tokens per stage, whether stage 1 stopped or stage 4
+ran, retry count, grounding failure, sufficiency, fit; counts and flags only).
+`python scripts/summarize_test.py` compares line mode with compact research OFF
+(A) against ON (B); the deciding figure is tokens per successful line. In line
+mode a name in the line is supported by the prospect's details, then the
+dossier, then the original research text; a number must be in the research.
+
+### The three-stage chain
 
 1. **Dossier** - raw scraped text to structured facts, each tagged with its source.
 2. **Angle** - dossier + what we sell to 1-2 angles, each *citing* a fact.
@@ -156,8 +217,8 @@ backend/app/
   ingest/             csv_loader, gsheet_loader, mapping (column auto-detection)
   sources/            base (the Source protocol), website, rss, news, exa (search, podcasts),
                       linkedin, linkedin_account, mcp_http, registry
-  ai/                 client (credentials/OAuth), chain, claude_code, openai_stage,
-                      schemas, defaults, pricing
+  ai/                 client (credentials/OAuth), chain, grounding, claude_code,
+                      openai_stage, schemas, defaults, pricing
   worker/             main (arq WorkerSettings), tasks, bookkeeping, limiter
   export/             csv_writer (streaming)
 frontend/app/(app)/   overview, uploads, uploads/[id], uploads/new, jobs, jobs/[id],
@@ -212,10 +273,20 @@ the settings UI, job launcher and CSV exporter all read that registry. Raise
 ### Source priority
 
 `registry.ALL_SOURCES` is in priority order, and that order is the product
-decision: the prospect's own LinkedIn post from the last 10 days, then podcasts
-and interviews, their LinkedIn profile, the company's LinkedIn page, news, and
-last the company website and RSS. `chain.format_research` shows research to the
-model in that order and the stage-2 prompt ranks angles by it. A recent post by
+decision: the prospect's own LinkedIn post from the last two weeks, then
+podcasts and interviews, their LinkedIn profile, the company's LinkedIn page,
+news, and last the company website and RSS. `chain.format_research` shows
+research to the model in that order and the stage-2 prompt ranks angles by it.
+
+Research is a **funnel** (`registry.run_funnel`), not a sweep: it stops at the
+first thing worth opening with. (1) The prospect's LinkedIn, one read with no
+scrolling: a post in the window ends it, and the profile from the same read is
+kept. (2) Podcasts, searched while the row waits its turn on LinkedIn: one
+found ends it. (3) News, website and RSS together. (4) The company's LinkedIn
+page only when all of that found nothing. So a row's research holds only the
+step that delivered, plus the failures above it. A row holds a concurrency slot
+only around the fetches that do work, never while it waits for LinkedIn, which
+is why many rows show "running" during a LinkedIn job. A recent post by
 the prospect about their work is a valid opener even with no link to the offer;
 whether they have the problem is decided separately (`fit_established`).
 
@@ -250,15 +321,15 @@ implemented:
   breaks LinkedIn's terms and can get the account restricted, so reads are
   serialized, spread at an hourly rate (`settings.linkedin_reads_per_hour`,
   default 20, with a randomised gap) and capped per day
-  (`settings.linkedin_daily_limit`). Rows that use it take `limiter.linkedin_row`
-  before a row slot, so their queue does not starve other rows, which is also
-  why arq's `max_jobs` is far above the concurrency cap. A spent cap pauses the
-  scrape job until
+  (`settings.linkedin_daily_limit`). Rows wait for their read outside the row
+  slots, which is why arq's `max_jobs` is far above the concurrency cap. A row
+  normally costs one read (the person); the company page is the funnel's last
+  resort. A spent cap pauses the scrape job until
   the next day. The account is connected from Settings: the api drops a flag
   in the shared `linkedin_control` volume and `deploy/linkedin-run.sh` (the
   service's entrypoint) swaps the server for its login browser, then back.
   **Do not remove or loosen that pacing to speed a job up.** The
-  service returns raw page text, so the 10-day filter reads LinkedIn's own age
+  service returns raw page text, so the two-week filter reads LinkedIn's own age
   stamps (`split_posts`); if LinkedIn changes them, that is the function to fix.
 
 ## Conventions
