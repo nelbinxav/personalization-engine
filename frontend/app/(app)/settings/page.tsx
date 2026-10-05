@@ -27,6 +27,7 @@ const KEY_FIELDS: { name: string; label: string; hint: string }[] = [
   { name: 'jina', label: 'Jina Reader', hint: 'Website content. Optional: works without a key at a lower rate limit.' },
   { name: 'serper', label: 'Serper.dev', hint: 'Google News. Optional: without it, news comes from a free web search.' },
   { name: 'apify', label: 'Apify', hint: 'LinkedIn profile and company pages.' },
+  { name: 'exa', label: 'Exa', hint: 'Web search for podcasts and news. Optional: without a key the free search allows only a few hundred searches a day, then waits until midnight UTC.' },
   { name: 'openai', label: 'OpenAI API key', hint: 'Only needed when a stage is set to an OpenAI model such as GPT-6 Luna. Billed per token by OpenAI.' },
   {
     name: 'google_service_account_json',

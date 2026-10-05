@@ -61,7 +61,12 @@ async def _post(
     except httpx.TransportError as exc:
         raise SourceError(f"Could not reach {httpx.URL(url).host}: {exc}") from exc
     if response.status_code == 429:
-        raise SourceRateLimited(f"{response.url.host} rate limit hit.")
+        limited = SourceRateLimited(f"{response.url.host} rate limit hit.")
+        try:
+            limited.retry_after = float(response.headers.get("retry-after"))
+        except (TypeError, ValueError):
+            limited.retry_after = None
+        raise limited
     if response.status_code >= 400:
         raise SourceError(f"{response.url.host} returned HTTP {response.status_code}")
     return response
@@ -84,13 +89,14 @@ async def call_tool(
     *,
     timeout: float = 60.0,
     handshake: bool = True,
+    extra_headers: dict[str, str] | None = None,
 ) -> dict:
     """Call one tool and return its result object (`content`, `structuredContent`).
 
     `handshake=False` skips initialize for servers that answer a bare call,
     which saves two round trips per search.
     """
-    headers = dict(_HEADERS)
+    headers = {**_HEADERS, **(extra_headers or {})}
 
     if handshake:
         init = await _post(

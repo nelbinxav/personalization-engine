@@ -64,6 +64,7 @@ async def provider_key(name: str) -> str | None:
         "jina": env.jina_api_key,
         "serper": env.serper_api_key,
         "apify": env.apify_token,
+        "exa": env.exa_api_key,
         "google_service_account_json": env.google_service_account_json,
         "anthropic": env.anthropic_api_key,
         "openai": env.openai_api_key,

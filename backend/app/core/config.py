@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     jina_api_key: Optional[str] = None
     serper_api_key: Optional[str] = None
     apify_token: Optional[str] = None
+    exa_api_key: Optional[str] = None
     # The LinkedIn browser service (docker compose profile "linkedin"), used by
     # the `account` LinkedIn provider.
     linkedin_mcp_url: str = "http://linkedin:8080/mcp"

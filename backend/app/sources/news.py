@@ -82,7 +82,7 @@ class NewsSource:
     async def _from_exa(
         self, company: str, cfg: SourceConfig, client: httpx.AsyncClient
     ) -> SourceResult:
-        text = await exa.company_news(client, company)
+        text = await exa.company_news(client, company, cfg.key("exa"))
         if not text or text.lower().startswith("no "):
             return failed(self.key, f"No recent news found for '{company}'", query=company)
         return ok(self.key, f"Recent news for {company}:\n\n{text}", cfg, query=company, via="exa")

@@ -38,6 +38,11 @@ class SourceDailyLimit(SourceError):
     tomorrow, so the job waits rather than retrying."""
 
 
+class SourceBusy(SourceError):
+    """The provider cannot be used this instant and the caller asked not to
+    wait (LinkedIn between paced reads). Not a failure: it is done later."""
+
+
 class SkipSource(Exception):
     """This prospect has nothing for this source to work with (e.g. no website).
 
@@ -57,8 +62,11 @@ class SourceConfig:
     linkedin_mcp_url: str = "http://linkedin:8080/mcp"
     linkedin_daily_limit: int = 150
     linkedin_reads_per_hour: int = 20
+    # False: a LinkedIn read that would have to wait for its turn raises
+    # SourceBusy instead. Research never waits; the background check does.
+    linkedin_wait: bool = True
     # A post older than this is not "recent" enough to open a message with.
-    recent_post_days: int = 10
+    recent_post_days: int = 14
     max_content_chars: int = MAX_CONTENT_CHARS
 
     def key(self, name: str) -> str | None:

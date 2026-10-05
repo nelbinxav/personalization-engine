@@ -153,6 +153,9 @@ async def _job_out(doc: dict) -> JobOut:
         resume_at=doc.get("resume_at"),
         tokens=doc.get("tokens", 0),
         limit_events=doc.get("limit_events", []),
+        linkedin_pending=await mongo.prospects().count_documents(
+            {"upload_id": doc["upload_id"], "linkedin_pending": True}
+        ),
     )
 
 

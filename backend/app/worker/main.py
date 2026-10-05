@@ -7,6 +7,7 @@ while jobs run; it is the single knob controlling both scraping provider load
 and Claude spend rate. arq's own `max_jobs` is only the ceiling, because arq
 fixes it at startup.
 """
+import asyncio
 import logging
 
 from arq import cron
@@ -14,6 +15,7 @@ from arq import cron
 from app.core.config import get_settings
 from app.db import mongo
 from app.db.init_db import initialize_database
+from app.worker import linkedin_backfill
 from app.worker.bookkeeping import redis_settings, resume_due_jobs
 from app.worker.limiter import ARQ_MAX_JOBS
 from app.worker.tasks import MAX_TRIES, personalize_prospect, scrape_prospect
@@ -42,10 +44,18 @@ async def startup(ctx: dict) -> None:
             "from .env / docker-compose, or switch Settings to API key mode."
         )
 
+    # LinkedIn is read in the background, at its own pace, for leads that were
+    # researched without waiting for it.
+    ctx["linkedin_backfill"] = asyncio.create_task(linkedin_backfill.run_forever())
+
     logger.info("Worker ready (concurrency=%s, from Settings)", settings.concurrency)
 
 
 async def shutdown(ctx: dict) -> None:
+    task = ctx.get("linkedin_backfill")
+    if task:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     await mongo.close_client()
 
 

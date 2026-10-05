@@ -16,9 +16,8 @@ account, and the engine asks it for one page at a time.
   treated better than a brand-new one.
 - **It is slow on purpose.** One page at a time, spread over the day at an
   hourly rate (20 reads an hour by default: one about every three minutes, at
-  uneven intervals), under a daily cap (150 reads, about 75 prospects, which
-  take about seven and a half hours). A 1,000-row sheet takes around two
-  weeks. When the day's cap is used up the research job pauses and carries on
+  uneven intervals), under a daily cap (150 reads, about 150 prospects, which
+  take about seven and a half hours). A 1,000-row sheet takes around a week. When the day's cap is used up the research job pauses and carries on
   by itself the next day. Both numbers are in Settings; lower is safer.
 - **Keep it in one place.** Sign in on the machine that will run it. A session
   that moves between addresses triggers LinkedIn's security checks.
@@ -73,8 +72,12 @@ column.
 
 ## What the engine does with posts
 
-- Only posts stamped within the last 10 days are kept. LinkedIn shows "1w" for
-  anything 7 to 13 days old, so those are kept and marked as such.
+- Only the top of the activity page is read, with no scrolling, and only a
+  post from the last two weeks counts. LinkedIn shows "1w" for 7 to 13 days and
+  "2w" for 14 to 20, so both are kept and marked as such.
+- A lead normally costs one LinkedIn read. If a recent post is found, research
+  for that lead stops there; the company page is read only when nothing else
+  turned up.
 - A repost is labelled as someone else's words and is not used as the
   prospect's own.
 - A row with no recent post simply has no post to open with; the engine moves

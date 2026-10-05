@@ -74,6 +74,8 @@ export interface Job {
   tokens: number
   /** Each pause for a limit: when, why, and when it resumed. */
   limit_events: { at: string; reason: string; resume_at: string | null }[]
+  /** Leads of this upload still waiting for the background LinkedIn check. */
+  linkedin_pending: number
 }
 
 export interface Identity {

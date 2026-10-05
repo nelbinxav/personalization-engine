@@ -89,3 +89,5 @@ class JobOut(BaseModel):
     resume_at: datetime | None = None
     tokens: int = 0
     limit_events: list[dict] = Field(default_factory=list)
+    # Leads of this upload still waiting for the background LinkedIn check.
+    linkedin_pending: int = 0

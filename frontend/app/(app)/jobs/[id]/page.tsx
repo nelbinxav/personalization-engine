@@ -205,6 +205,14 @@ export default function JobDetailPage() {
         </Alert>
       )}
 
+      {isScrape && job.linkedin_pending > 0 && (
+        <Alert tone="info" className="mb-6" title={`${job.linkedin_pending} lead${job.linkedin_pending === 1 ? ' is' : 's are'} still being checked in the background`}>
+          Research did not wait. LinkedIn is read slowly to protect the account, and the free web search (podcasts
+          and news) has a daily allowance; what they find is added here as it comes in. You can personalize now: a
+          lead whose recent post or podcast arrives later is handed back to be written again.
+        </Alert>
+      )}
+
       {job.limit_events?.length > 0 && !waiting && (
         <p className="mb-6 text-xs text-muted-foreground">
           Paused for a limit {job.limit_events.length} time{job.limit_events.length === 1 ? '' : 's'}, last{' '}

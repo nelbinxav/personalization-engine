@@ -22,11 +22,13 @@ interface LinkedInStatus {
   checked_at: string | null
   reads_today: number
   daily_limit: number
+  reads_per_hour: number
+  pending: number
 }
 
 export function LinkedInConnection() {
   const [status, setStatus] = useState<LinkedInStatus | null>(null)
-  const [busy, setBusy] = useState<'connect' | 'test' | null>(null)
+  const [busy, setBusy] = useState<'connect' | 'test' | 'clear' | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -66,6 +68,19 @@ export function LinkedInConnection() {
     try {
       const result = await api.post<{ account: string }>('/settings/linkedin/test')
       toast.success(`Connected as ${result.account}.`)
+    } catch (err: any) {
+      toast.error(err.message)
+    } finally {
+      setBusy(null)
+      refresh()
+    }
+  }
+
+  async function clearQueue() {
+    setBusy('clear')
+    try {
+      const result = await api.post<{ cleared: number }>('/settings/linkedin/clear-queue')
+      toast.success(`Stopped. ${result.cleared} lead${result.cleared === 1 ? '' : 's'} removed from the LinkedIn queue.`)
     } catch (err: any) {
       toast.error(err.message)
     } finally {
@@ -148,6 +163,19 @@ export function LinkedInConnection() {
             </Button>
           </div>
           <p className="hint">Testing reads your own profile once and counts as one of today&apos;s reads.</p>
+
+          {status.pending > 0 && (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4 text-sm">
+              <span>
+                <span className="font-medium tabular-nums">{status.pending}</span> lead{status.pending === 1 ? '' : 's'}{' '}
+                waiting for a LinkedIn check, at {status.reads_per_hour} an hour. It runs in the background; research
+                and personalization do not wait for it.
+              </span>
+              <Button size="sm" variant="ghost" onClick={clearQueue} loading={busy === 'clear'}>
+                Stop and clear
+              </Button>
+            </div>
+          )}
         </>
       )}
     </div>

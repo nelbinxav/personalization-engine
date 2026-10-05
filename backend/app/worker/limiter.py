@@ -15,9 +15,9 @@ from app.core import settings_store
 
 # The most the Concurrency setting can ask for.
 MAX_CONCURRENCY = 32
-# arq's max_jobs. Far above MAX_CONCURRENCY on purpose: a task waiting here for
-# a slot, or for its turn on LinkedIn, costs nothing, and a low ceiling would
-# let one slow job's waiting rows keep arq from starting another job's rows.
+# arq's max_jobs. Far above MAX_CONCURRENCY on purpose: a research task spends
+# most of its life waiting for its turn on LinkedIn, which costs nothing, and a
+# low ceiling would let those waiting rows keep arq from starting others.
 ARQ_MAX_JOBS = 400
 _REFRESH_SECONDS = 10
 _POLL_SECONDS = 0.25
@@ -60,9 +60,3 @@ class RowLimiter:
 
 
 rows = RowLimiter()
-
-# Rows that read LinkedIn through the account go one at a time, and take this
-# lock before a row slot, so a queue of them waiting on LinkedIn's slow pace
-# does not hold the slots other rows need.
-linkedin_row = asyncio.Lock()
-

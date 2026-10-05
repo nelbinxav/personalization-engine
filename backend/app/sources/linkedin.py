@@ -196,6 +196,9 @@ class LinkedInPostsSource:
                 url=url,
             )
 
+        if linkedin_account.has_no_activity(raw):
+            return failed(self.key, "No posts on this profile", url=url)
+
         recent, found = linkedin_account.recent_posts(raw, cfg.recent_post_days)
         if not found:
             # LinkedIn changed how it stamps post ages. Pass the text through

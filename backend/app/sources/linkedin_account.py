@@ -33,7 +33,13 @@ from pymongo.errors import DuplicateKeyError
 
 from app.core.config import get_settings
 from app.db import mongo
-from app.sources.base import SourceConfig, SourceDailyLimit, SourceError, SourceRateLimited
+from app.sources.base import (
+    SourceBusy,
+    SourceConfig,
+    SourceDailyLimit,
+    SourceError,
+    SourceRateLimited,
+)
 from app.sources.mcp_http import ToolFailed, call_tool, tool_text
 
 logger = logging.getLogger(__name__)
@@ -52,13 +58,14 @@ def read_gap(reads_per_hour: int) -> tuple[float, float]:
     """
     even = 3600 / max(reads_per_hour, 1)
     return max(MIN_GAP, even * 0.6), max(MIN_GAP, even * 1.4)
-MAX_POSTS = 5
+# Only the top of the activity page matters: the newest post or two.
+MAX_POSTS = 2
 MAX_POST_CHARS = 1500
 
 LOGIN_HELP = "Connect it under Settings, Research, LinkedIn account."
 
 _gate = asyncio.Lock()
-_last_read = 0.0
+_next_read_at = 0.0
 _inflight: dict[tuple[str, str], asyncio.Future] = {}
 
 
@@ -113,14 +120,21 @@ def _classify(message: str) -> SourceError:
     return SourceError(f"LinkedIn read failed: {message[:300]}")
 
 
+def turn_available() -> bool:
+    """True when a LinkedIn read could start right now without waiting."""
+    return not _gate.locked() and asyncio.get_running_loop().time() >= _next_read_at
+
+
 async def _read(client: httpx.AsyncClient, cfg: SourceConfig, tool: str, arguments: dict) -> dict:
-    global _last_read
+    global _next_read_at
+    loop = asyncio.get_running_loop()
+    if not cfg.linkedin_wait and not turn_available():
+        raise SourceBusy("LinkedIn is checked in the background for this lead.")
     async with _gate:
-        await _spend_daily_budget(cfg.linkedin_daily_limit)
-        loop = asyncio.get_running_loop()
-        wait = _last_read + random.uniform(*read_gap(cfg.linkedin_reads_per_hour)) - loop.time()
-        if _last_read and wait > 0:
+        wait = _next_read_at - loop.time()
+        if wait > 0:
             await asyncio.sleep(wait)
+        await _spend_daily_budget(cfg.linkedin_daily_limit)
         try:
             result = await call_tool(
                 client, cfg.linkedin_mcp_url, tool, arguments, timeout=TOOL_TIMEOUT
@@ -142,7 +156,8 @@ async def _read(client: httpx.AsyncClient, cfg: SourceConfig, tool: str, argumen
                 ) from exc
             raise
         finally:
-            _last_read = loop.time()
+            # The next read may start after a gap set by the hourly rate.
+            _next_read_at = loop.time() + random.uniform(*read_gap(cfg.linkedin_reads_per_hour))
 
     await _remember(True)
     data = result.get("structuredContent")
@@ -171,7 +186,12 @@ async def person(client: httpx.AsyncClient, cfg: SourceConfig, url: str) -> dict
     return await _shared(
         ("person", url),
         lambda: _read(
-            client, cfg, "get_person_profile", {"linkedin_username": url, "sections": "posts"}
+            client,
+            cfg,
+            "get_person_profile",
+            # max_scrolls 1: read what the page shows first and stop. The newest
+            # post is at the top, and an older one is of no use.
+            {"linkedin_username": url, "sections": "posts", "max_scrolls": 1},
         ),
     )
 
@@ -201,9 +221,21 @@ def section_error(data: dict, name: str) -> str | None:
 # Recent posts
 # --------------------------------------------------------------------------
 
-# LinkedIn stamps a post "5h", "3d", "1w", "2mo" or "1yr", next to a bullet.
-_AGE = re.compile(r"(?<![\w.])(\d{1,3})\s?(mo|yr|h|d|w|m)\b(?=\s*[•·])|[•·]\s*(\d{1,3})\s?(mo|yr|h|d|w|m)\b")
-_POST_START = re.compile(r"^Feed post number \d+\s*$", re.MULTILINE)
+# LinkedIn stamps a post "5h", "3d", "1w", "2mo" or "1yr": next to a bullet, or
+# (on a person's activity page) on a line of its own.
+_AGE = re.compile(
+    r"(?<![\w.])(\d{1,3})\s?(mo|yr|h|d|w|m)\b(?=\s*[•·])"
+    r"|[•·]\s*(\d{1,3})\s?(mo|yr|h|d|w|m)\b"
+    r"|^[ \t]*(\d{1,3})\s?(mo|yr|h|d|w|m)[ \t]*$",
+    re.MULTILINE,
+)
+_POST_START = re.compile(r"^Feed post(?: number \d+)?[ \t]*$", re.MULTILINE)
+# Everything from here down the page is LinkedIn's own suggestions, not posts.
+_PAGE_TAIL = re.compile(r"^(?:People you may know|Load more)[ \t]*$", re.MULTILINE)
+# What LinkedIn shows instead of a feed when the person has posted nothing.
+_NO_ACTIVITY = ("nothing to see for now", "has no recent posts", "hasn't posted")
+# Buttons and counters that sit between the lines of a post.
+_CHROME_LINE = re.compile(r"^[ \t]*(?:Follow|Following|Connect|Message|… more|\.\.\. more|\d[\d,]*)[ \t]*$\n?", re.MULTILINE)
 _UNIT_DAYS = {"m": 0.0, "h": 1 / 24, "d": 1.0, "w": 7.0, "mo": 30.0, "yr": 365.0}
 
 
@@ -221,6 +253,9 @@ def split_posts(raw: str) -> list[Post]:
     otherwise from one age stamp to the next. A block with no stamp is dropped:
     without an age it cannot be called recent.
     """
+    tail = _PAGE_TAIL.search(raw)
+    if tail:
+        raw = raw[: tail.start()]
     starts = [m.start() for m in _POST_START.finditer(raw)]
     if starts:
         blocks = [raw[a:b] for a, b in zip(starts, starts[1:] + [len(raw)])]
@@ -235,21 +270,31 @@ def split_posts(raw: str) -> list[Post]:
         match = _AGE.search(block)
         if not match:
             continue
-        number, unit = (match.group(1), match.group(2)) if match.group(1) else (match.group(3), match.group(4))
-        text = _POST_START.sub("", block).strip()
+        groups = [g for g in match.groups() if g]
+        number, unit = groups[0], groups[1]
+        text = _CHROME_LINE.sub("", _POST_START.sub("", block)).strip()
         if text:
             posts.append(Post(age=f"{number}{unit}", days=int(number) * _UNIT_DAYS[unit], text=text))
     return posts
+
+
+def has_no_activity(raw: str) -> bool:
+    """True when the page says the person has not posted, rather than showing posts."""
+    head = raw[:1500].lower()
+    return not _POST_START.search(raw) and any(marker in head for marker in _NO_ACTIVITY)
 
 
 def recent_posts(raw: str, window_days: int) -> tuple[list[Post], int]:
     """(posts inside the window, how many posts were found at all).
 
     LinkedIn rounds to whole weeks after six days, so "1w" covers 7 to 13 days
-    and is kept; "2w" and older are out.
+    and "2w" 14 to 20. With a two-week window both are kept; "3w" and older
+    are out. Only the first posts on the page are considered: a recent post
+    further down, below older ones, would be a pinned or reshuffled feed.
     """
     posts = split_posts(raw)
-    return [p for p in posts if p.days <= max(window_days, 7)][:MAX_POSTS], len(posts)
+    top = posts[:MAX_POSTS]
+    return [p for p in top if p.days <= max(window_days, 7)], len(posts)
 
 
 def render_posts(posts: list[Post], owner: str, now: datetime | None = None) -> str:
@@ -260,7 +305,12 @@ def render_posts(posts: list[Post], owner: str, now: datetime | None = None) -> 
     ]
     for post in posts:
         when = (now - timedelta(days=post.days)).strftime("%d %B %Y")
-        approx = "between 7 and 13 days ago" if post.age.endswith("w") else f"about {when}"
+        weeks = int(post.days // 7)
+        approx = (
+            f"between {weeks * 7} and {weeks * 7 + 6} days ago"
+            if post.age.endswith("w")
+            else f"about {when}"
+        )
         text = post.text if len(post.text) <= MAX_POST_CHARS else post.text[:MAX_POST_CHARS] + " [...]"
         lines.append(f"--- Post, LinkedIn age stamp {post.age} ({approx}) ---\n{text}")
     return "\n\n".join(lines)
@@ -338,6 +388,14 @@ async def status(client: httpx.AsyncClient, cfg: SourceConfig) -> dict:
         "checked_at": state.get("checked_at"),
         "reads_today": used,
         "daily_limit": cfg.linkedin_daily_limit,
+        "reads_per_hour": cfg.linkedin_reads_per_hour,
+        # Leads researched without waiting for LinkedIn, still to be checked.
+        "pending": await mongo.prospects().count_documents(
+            {
+                "linkedin_pending": True,
+                "linkedin_pending_keys": {"$in": ["linkedin_posts", "linkedin_profile"]},
+            }
+        ),
     }
 
 

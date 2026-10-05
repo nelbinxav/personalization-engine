@@ -294,3 +294,14 @@ async def usage() -> dict:
         "by_stage_7_days": by_stage,
         "tokens_per_row": round(week["tokens"] / week["rows"]) if week["rows"] else None,
     }
+
+
+@router.post("/linkedin/clear-queue")
+async def linkedin_clear_queue() -> dict:
+    """Stop the background LinkedIn check: drop every lead still waiting for it.
+    What has already been read is kept."""
+    result = await mongo.prospects().update_many(
+        {"linkedin_pending": True},
+        {"$set": {"linkedin_pending": False, "linkedin_pending_keys": []}},
+    )
+    return {"cleared": result.modified_count}
