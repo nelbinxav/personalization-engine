@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.ai.chain import stage_model
 from app.ai.openai_stage import is_openai_model
 from app.api.deps import current_operator
+from app.ai.agent_context import settings_with_agent
 from app.core import settings_store
 from app.db import mongo
 from app.models.common import Channel, RowStatus, utcnow
@@ -79,11 +80,12 @@ async def create_job(payload: CreateJobRequest) -> JobOut:
             )
     else:
         options.channel = options.channel or Channel.email
-        if not settings.offer_context.strip():
+        offer = (await settings_with_agent(settings, options.agent_id)).offer_context
+        if not offer.strip():
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                "Set 'What we sell' in Settings before personalizing - stage 2 cannot "
-                "judge whether an angle is relevant without it.",
+                "Train an agent, or set 'What we sell' in Settings, before personalizing - "
+                "stage 2 cannot judge whether an angle is relevant without it.",
             )
 
         # A stage given to an OpenAI model fails every row without its key.

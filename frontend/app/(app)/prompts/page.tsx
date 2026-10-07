@@ -29,7 +29,7 @@ const STAGE_INFO: Record<number, { name: string; job: string }> = {
 }
 
 const PLACEHOLDERS: { token: string; help: string; stages?: number[]; perRow?: boolean }[] = [
-  { token: '{{offer_context}}', help: 'What you sell, from Settings. Same for every row, so it stays cached.' },
+  { token: '{{offer_context}}', help: 'What you sell, from the agent you pick. Same for every row, so it stays cached.' },
   { token: '{{template}}', help: 'The channel template.', stages: [3] },
   { token: '{{constraints}}', help: 'The channel character limits.', stages: [3] },
   { token: '{{identity.first_name}}', help: 'Per prospect. Turns caching off for this stage.', perRow: true },

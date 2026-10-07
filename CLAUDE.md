@@ -143,6 +143,25 @@ ran, retry count, grounding failure, sufficiency, fit; counts and flags only).
 mode a name in the line is supported by the prospect's details, then the
 dossier, then the original research text; a number must be in the research.
 
+### Agents (`app/ai/agent_context.py`, `app/ai/trainer.py`)
+
+An Agent is one offer's trained profile (what we sell, ICP, proof, voice,
+objections, qualification, booking link, never-claim list), edited on the
+Agents page after a live chat with the trainer (`POST /agents/chat`, server-sent
+events: the reply streams as `delta`, then a second call returns the updated
+profile; `claude_code` and OpenAI models send the reply in one piece). Append-only
+like prompts, grouped by `lineage_id`; a job stores the exact version in
+`options.agent_id`. `settings_with_agent()` swaps the agent's rendered text in
+for `settings.offer_context`, in the worker and in preview, so the chain is
+untouched; no agent, an unknown id or an empty profile falls back to the
+Settings offer. Both trainer system prompts are fixed; the chat, profile and
+attached text go in the user turn (cache-safe, and `claude_code` takes one
+message). An agent also carries its output mode, compact-research switch and
+relevant words (Settings no longer has them; they are the fallback for a job with
+no agent). The Agents page has a "Try it" panel: `POST /preview` with the
+unsaved `agent_profile`, on a researched row, nothing saved. The never-claim
+list is prompt text only, not yet a code check.
+
 ### The three-stage chain
 
 1. **Dossier** - raw scraped text to structured facts, each tagged with its source.
@@ -215,7 +234,7 @@ did not say) and then restarts it. Its message says "wait", not "reconnect".
 
 ```
 backend/app/
-  api/v1/endpoints/   auth uploads jobs prompts templates preview settings exports
+  api/v1/endpoints/   auth uploads jobs prompts templates agents preview settings exports
   ingest/             csv_loader, gsheet_loader, mapping (column auto-detection)
   sources/            base (the Source protocol), website, rss, news, exa (search, podcasts),
                       linkedin, linkedin_account, mcp_http, registry
@@ -224,7 +243,7 @@ backend/app/
   worker/             main (arq WorkerSettings), tasks, bookkeeping, limiter
   export/             csv_writer (streaming)
 frontend/app/(app)/   overview, uploads, uploads/[id], uploads/new, jobs, jobs/[id],
-                      prompts, templates, settings
+                      agents, prompts, templates, settings
 frontend/components/  ui/ (design system + toast), launch-job (shared job launcher),
                       job-watcher (finish/pause notifications)
 frontend/lib/         api, types, workflow (next-step logic, readiness checks, formatting)

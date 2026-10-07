@@ -20,6 +20,7 @@ from datetime import timedelta
 
 from arq import Retry
 
+from app.ai.agent_context import settings_with_agent
 from app.ai.chain import ChainError, RateLimited, RefusalError, run_chain
 from app.ai.claude_code import UsageLimitReached
 from app.ai.client import AuthUnavailable
@@ -216,7 +217,9 @@ async def _personalize(ctx: dict, job_id: str, prospect_id: str) -> str:
         await bookkeeping.record_row(job_id, "skipped")
         return "skipped"
 
-    settings = await settings_store.load()
+    settings = await settings_with_agent(
+        await settings_store.load(), options.get("agent_id")
+    )
 
     template_doc = await mongo.templates().find_one({"_id": options.get("template_id")})
     if not template_doc:

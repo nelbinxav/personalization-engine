@@ -66,3 +66,7 @@ def staging():
 
 def counters():
     return get_db()["counters"]
+
+
+def agents():
+    return get_db()["agents"]

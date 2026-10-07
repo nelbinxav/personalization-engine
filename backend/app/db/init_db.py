@@ -34,6 +34,7 @@ async def initialize_database() -> None:
     # identify a revision and `is_active` marks the one in use.
     await mongo.prompts().create_index([("stage", ASCENDING), ("version", DESCENDING)])
     await mongo.templates().create_index([("channel", ASCENDING), ("version", DESCENDING)])
+    await mongo.agents().create_index([("lineage_id", ASCENDING), ("version", DESCENDING)])
 
     # Scrape response cache, expired by mongo via a per-document expires_at.
     await mongo.source_cache().create_index(
