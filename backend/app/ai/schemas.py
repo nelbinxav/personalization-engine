@@ -163,3 +163,36 @@ def strict_schema(model: type[BaseModel]) -> dict:
         return resolved
 
     return resolve(schema)
+
+
+class ObjectionOut(BaseModel):
+    objection: str
+    response: str
+
+
+class AgentProfileOut(BaseModel):
+    offer: str
+    what_we_do: str
+    icp: str
+    proof_points: list[str]
+    voice: str
+    sample_messages: list[str]
+    objections: list[ObjectionOut]
+    qualification: str
+    booking_link: str
+    never_claim: list[str]
+    relevance_terms: list[str]
+
+
+class ChatSchema(BaseModel):
+    """One chat turn, for the providers that cannot stream plain text."""
+
+    reply: str
+
+
+class ProfileUpdateSchema(BaseModel):
+    """The profile after a chat turn, and what is still thin."""
+
+    profile: AgentProfileOut
+    missing: list[str]
+    done: bool

@@ -58,6 +58,52 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return payload as T
 }
 
+/**
+ * POST and read a server-sent event stream, calling `onEvent` for each event as
+ * it arrives. Errors before the stream starts throw like `api`; errors during it
+ * arrive as events.
+ */
+export async function streamPost<E>(
+  path: string,
+  body: unknown,
+  onEvent: (event: E) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${API_URL}/api/v1${path}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+  if (!response.ok || !response.body) {
+    let detail = ''
+    try {
+      detail = (await response.json())?.detail
+    } catch {}
+    throw new ApiError(typeof detail === 'string' && detail ? detail : `Request failed (${response.status})`, response.status)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() ?? ''
+    for (const part of parts) {
+      const data = part
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trim())
+        .join('')
+      if (data) onEvent(JSON.parse(data) as E)
+    }
+  }
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) =>

@@ -12,6 +12,7 @@ import {
   CheckboxRow,
   Field,
   Segmented,
+  Select,
   ToggleChip,
   cn,
   toast,
@@ -51,10 +52,11 @@ export function LaunchJob({
   compact?: boolean
 }) {
   const router = useRouter()
-  const { settings, templates, ai } = readiness
+  const { settings, templates, agents, ai } = readiness
 
   const [channel, setChannel] = useState<Channel>('email')
   const [limit, setLimit] = useState<Limit>('3')
+  const [agentId, setAgentId] = useState('')
   const [force, setForce] = useState(false)
   const [sources, setSources] = useState<string[] | null>(null)
   const [busy, setBusy] = useState(false)
@@ -65,6 +67,11 @@ export function LaunchJob({
   useEffect(() => {
     if (settings && sources === null) setSources(settings.settings.enabled_sources)
   }, [settings, sources])
+
+  // Default to an agent: they carry the offer and how rows are written.
+  useEffect(() => {
+    if (!agentId && agents.length) setAgentId(agents.find((a) => a.is_active)?.id ?? agents[0].id)
+  }, [agents, agentId])
 
   // Default the channel to one that actually has a template.
   useEffect(() => {
@@ -100,6 +107,7 @@ export function LaunchJob({
         options: {
           sources: phase === 'scrape' ? sources ?? [] : [],
           channel: phase === 'personalize' ? channel : null,
+          agent_id: phase === 'personalize' && agentId ? agentId : null,
           force,
           limit: limit === 'all' ? null : Number(limit),
         },
@@ -231,6 +239,30 @@ export function LaunchJob({
               ),
             }))}
           />
+        </Field>
+      )}
+
+      {phase === 'personalize' && (
+        <Field
+          label="Agent"
+          hint={
+            <>
+              Who we are writing for.{' '}
+              <Link href="/agents" className="link">
+                {agents.length ? 'Edit agents' : 'Train one'}
+              </Link>
+              
+            </>
+          }
+        >
+          <Select value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+            {agents.length === 0 && <option value="">No agent yet</option>}
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name} · v{a.version}
+              </option>
+            ))}
+          </Select>
         </Field>
       )}
 

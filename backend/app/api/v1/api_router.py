@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    agents,
     auth,
     exports,
     jobs,
@@ -17,6 +18,7 @@ api_router.include_router(uploads.router)
 api_router.include_router(jobs.router)
 api_router.include_router(prompts.router)
 api_router.include_router(templates.router)
+api_router.include_router(agents.router)
 api_router.include_router(preview.router)
 api_router.include_router(settings.router)
 api_router.include_router(exports.router)

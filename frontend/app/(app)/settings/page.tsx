@@ -37,13 +37,6 @@ const KEY_FIELDS: { name: string; label: string; hint: string }[] = [
 ]
 
 // The three chain stages, in the order they run.
-function termList(text: string): string[] {
-  return text
-    .split('\n')
-    .map((t) => t.trim())
-    .filter(Boolean)
-}
-
 const STAGES = [
   { key: '1', label: 'Gather facts', note: 'Reads the research. The bulk of the tokens, the least judgement.' },
   { key: '2', label: 'Choose the angle', note: 'Decides what is relevant and whether there is evidence of fit.' },
@@ -52,7 +45,6 @@ const STAGES = [
 
 const SECTIONS = [
   { id: 'claude', label: 'Claude' },
-  { id: 'offer', label: 'What you sell' },
   { id: 'research', label: 'Research' },
   { id: 'keys', label: 'Provider keys' },
 ]
@@ -79,16 +71,12 @@ export default function SettingsPage() {
   const [busy, setBusy] = useState(false)
   const [checking, setChecking] = useState(false)
 
-  const [offer, setOffer] = useState('')
   const [concurrency, setConcurrency] = useState(4)
   const [linkedinDailyLimit, setLinkedinDailyLimit] = useState(150)
   const [linkedinPerHour, setLinkedinPerHour] = useState(20)
   const [model, setModel] = useState('claude-sonnet-5-5')
   const [stageModels, setStageModels] = useState<Record<string, string>>({})
   const [efforts, setEfforts] = useState<Record<string, string>>({})
-  const [outputMode, setOutputMode] = useState<'full_message' | 'personalized_line'>('full_message')
-  const [compact, setCompact] = useState(false)
-  const [terms, setTerms] = useState('')
   const [enabledSources, setEnabledSources] = useState<string[]>([])
   const [linkedinProvider, setLinkedinProvider] = useState('apify')
   const [keyEdits, setKeyEdits] = useState<Record<string, string>>({})
@@ -109,16 +97,12 @@ export default function SettingsPage() {
     ])
     setData(settings)
     setAi(status)
-    setOffer(settings.settings.offer_context)
     setConcurrency(settings.settings.concurrency)
     setLinkedinDailyLimit(settings.settings.linkedin_daily_limit)
     setLinkedinPerHour(settings.settings.linkedin_reads_per_hour)
     setModel(settings.settings.ai.model)
     setStageModels(settings.settings.ai.stage_models ?? {})
     setEfforts(settings.settings.ai.effort ?? {})
-    setOutputMode(settings.settings.ai.personalization_output_mode ?? 'full_message')
-    setCompact(settings.settings.ai.compact_research ?? false)
-    setTerms((settings.settings.ai.relevance_terms ?? []).join('\n'))
     setEnabledSources(settings.settings.enabled_sources)
     setLinkedinProvider(settings.settings.linkedin_provider)
     setMethod((current) => current ?? status?.mode ?? 'claude_code')
@@ -131,14 +115,10 @@ export default function SettingsPage() {
   const saved = data?.settings
   const dirty =
     !!saved &&
-    (offer !== saved.offer_context ||
-      concurrency !== saved.concurrency ||
+    (concurrency !== saved.concurrency ||
       linkedinDailyLimit !== saved.linkedin_daily_limit ||
       linkedinPerHour !== saved.linkedin_reads_per_hour ||
       model !== saved.ai.model ||
-      outputMode !== (saved.ai.personalization_output_mode ?? 'full_message') ||
-      compact !== (saved.ai.compact_research ?? false) ||
-      termList(terms).join() !== (saved.ai.relevance_terms ?? []).join() ||
       STAGES.some(
         (st) =>
           (stageModels[st.key] ?? '') !== (saved.ai.stage_models?.[st.key] ?? '') ||
@@ -158,16 +138,12 @@ export default function SettingsPage() {
 
   function discard() {
     if (!saved) return
-    setOffer(saved.offer_context)
     setConcurrency(saved.concurrency)
     setLinkedinDailyLimit(saved.linkedin_daily_limit)
     setLinkedinPerHour(saved.linkedin_reads_per_hour)
     setModel(saved.ai.model)
     setStageModels(saved.ai.stage_models ?? {})
     setEfforts(saved.ai.effort ?? {})
-    setOutputMode(saved.ai.personalization_output_mode ?? 'full_message')
-    setCompact(saved.ai.compact_research ?? false)
-    setTerms((saved.ai.relevance_terms ?? []).join('\n'))
     setEnabledSources(saved.enabled_sources)
     setLinkedinProvider(saved.linkedin_provider)
     setKeyEdits({})
@@ -181,7 +157,6 @@ export default function SettingsPage() {
       const keys: Record<string, string> = Object.fromEntries(Object.entries(keyEdits).filter(([, v]) => v))
       for (const name of cleared) if (!keys[name]) keys[name] = ''
       await api.put('/settings', {
-        offer_context: offer,
         concurrency,
         linkedin_daily_limit: linkedinDailyLimit,
         linkedin_reads_per_hour: linkedinPerHour,
@@ -191,9 +166,6 @@ export default function SettingsPage() {
           model,
           stage_models: stageModels,
           effort: efforts,
-          personalization_output_mode: outputMode,
-          compact_research: compact,
-          relevance_terms: termList(terms),
         },
         provider_keys: Object.keys(keys).length ? keys : undefined,
       })
@@ -253,7 +225,7 @@ export default function SettingsPage() {
 
   return (
     <>
-      <PageHeader title="Settings" description="How Claude is reached, what you sell, and where research comes from." />
+      <PageHeader title="Settings" description="How Claude is reached, which models run each stage, and where research comes from. What you sell, and how it writes, is set per agent." />
 
       <nav className="-mt-4 mb-8 flex flex-wrap gap-1 border-b border-border" aria-label="Settings sections">
         {SECTIONS.map((s) => (
@@ -526,83 +498,7 @@ export default function SettingsPage() {
                 </div>
               </div>
 
-              <div className="mt-5 border-t border-border pt-5">
-                <p className="mb-1 text-sm font-medium">What gets written</p>
-                <p className="hint mb-3 mt-0">
-                  The personal statement is always written, in its own column. The full message is a second, separate
-                  column and is only written when you switch it on. Off, there is no subject, message or template
-                  copy at all, so your template can live in the sending tool. A row with no good evidence gets a blank
-                  statement, never filler. Applies to the next row, no restart. Rows already written keep their format.
-                </p>
-                <label className="flex items-start gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className="mt-1"
-                    checked={outputMode === 'full_message'}
-                    onChange={(e) => setOutputMode(e.target.checked ? 'full_message' : 'personalized_line')}
-                  />
-                  <span>
-                    Also write the full message from the template
-                    <span className="block text-xs text-muted-foreground">
-                      Adds the Message column (subject, body, which copy was used). Costs more tokens per row.
-                    </span>
-                  </span>
-                </label>
-                <label className="mt-4 flex items-start gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className="mt-1"
-                    checked={compact}
-                    onChange={(e) => setCompact(e.target.checked)}
-                  />
-                  <span>
-                    Compact research
-                    <span className="block text-xs text-muted-foreground">
-                      Reads about 3,000 characters per source (its most relevant paragraphs) and stops rows whose only
-                      evidence is funding, awards, earnings, partnerships or certifications.
-                    </span>
-                  </span>
-                </label>
-                {compact && (
-                  <Field
-                    id="relevance-terms"
-                    label="Relevant words"
-                    hint="One per line: the platforms, costs and changes your campaign cares about. Paragraphs that use them are kept."
-                  >
-                    <textarea
-                      id="relevance-terms"
-                      className="input h-32 resize-y"
-                      value={terms}
-                      onChange={(e) => setTerms(e.target.value)}
-                      placeholder={'databricks\nsnowflake\ncost\nmigration'}
-                    />
-                  </Field>
-                )}
-              </div>
             </div>
-          </Card>
-        </section>
-
-        {/* ----------------------------------------------------------- Offer */}
-        <section id="offer" className="scroll-mt-8">
-          <Card>
-            <CardHeader
-              title="What you sell"
-              description="Stage 2 uses this to judge whether an angle is relevant, not merely true. Personalization will not start without it."
-              action={!offer.trim() && <Badge tone="warning">Required</Badge>}
-            />
-            <textarea
-              id="offer-text"
-              aria-label="What you sell"
-              className="input h-36 resize-y leading-relaxed"
-              value={offer}
-              onChange={(e) => setOffer(e.target.value)}
-              placeholder="We help data teams cut Databricks spend by up to 75% without changing their stack…"
-            />
-            <p className="hint">
-              One or two short paragraphs: who it is for, the outcome, and the proof. It is shared across every row, so
-              it stays cached.
-            </p>
           </Card>
         </section>
 

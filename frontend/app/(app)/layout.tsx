@@ -1,6 +1,7 @@
 'use client'
 
 import {
+  Bot,
   FileSpreadsheet,
   LayoutDashboard,
   LogOut,
@@ -35,6 +36,7 @@ const NAV: { title: string; items: { href: string; label: string; icon: LucideIc
   {
     title: 'Configure',
     items: [
+      { href: '/agents', label: 'Agents', icon: Bot },
       { href: '/prompts', label: 'Prompts', icon: Sparkles },
       { href: '/templates', label: 'Templates', icon: MessageSquareText },
       { href: '/settings', label: 'Settings', icon: Settings },

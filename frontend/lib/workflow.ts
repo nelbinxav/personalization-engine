@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 
 import type { StepState } from '@/components/ui'
 import { api } from '@/lib/api'
-import type { AiStatus, Channel, Job, SettingsResponse, Template, Upload } from '@/lib/types'
+import type { Agent, AiStatus, Channel, Job, SettingsResponse, Template, Upload } from '@/lib/types'
 
 /* --------------------------------------------------------------- constants */
 
@@ -179,6 +179,8 @@ export interface Readiness {
   ai: AiStatus | null
   settings: SettingsResponse | null
   templates: Template[]
+  /** Active version of each trained agent. */
+  agents: Agent[]
   checks: Check[]
   reload: () => Promise<void>
   /** Checks that would make a job of this type fail before it starts. */
@@ -190,17 +192,20 @@ export function useReadiness(): Readiness {
   const [ai, setAi] = useState<AiStatus | null>(null)
   const [settings, setSettings] = useState<SettingsResponse | null>(null)
   const [templates, setTemplates] = useState<Template[]>([])
+  const [agents, setAgents] = useState<Agent[]>([])
   const [loading, setLoading] = useState(true)
 
   const reload = useCallback(async () => {
-    const [status, config, list] = await Promise.all([
+    const [status, config, list, trained] = await Promise.all([
       api.get<AiStatus>('/settings/ai/status').catch(() => null),
       api.get<SettingsResponse>('/settings').catch(() => null),
       api.get<Template[]>('/templates').catch(() => [] as Template[]),
+      api.get<Agent[]>('/agents?active_only=true').catch(() => [] as Agent[]),
     ])
     setAi(status)
     setSettings(config)
     setTemplates(list)
+    setAgents(trained)
     setLoading(false)
   }, [])
 
@@ -226,11 +231,11 @@ export function useReadiness(): Readiness {
     },
     {
       key: 'offer',
-      label: 'Describe what you sell',
-      ok: !!settings?.settings.offer_context.trim(),
-      detail: 'Stage 2 uses it to judge whether an angle is relevant, not merely true.',
-      href: '/settings#offer',
-      cta: 'Write it',
+      label: 'Train an agent',
+      ok: !!settings?.settings.offer_context.trim() || agents.length > 0,
+      detail: 'Stage 2 uses it to judge whether an angle is relevant, not merely true. Train an agent: it holds the offer, the proof and the voice.',
+      href: '/agents',
+      cta: 'Train an agent',
       blocks: ['personalize'],
     },
     {
@@ -276,5 +281,5 @@ export function useReadiness(): Readiness {
     return blockers
   }
 
-  return { loading, ai, settings, templates, checks, reload, blockersFor }
+  return { loading, ai, settings, templates, agents, checks, reload, blockersFor }
 }

@@ -41,6 +41,8 @@ class JobOptions(BaseModel):
     sources: list[str] = Field(default_factory=list)
     channel: Channel | None = None
     template_id: str | None = None
+    # The exact agent version used, so an export traces to its profile.
+    agent_id: str | None = None
     prompt_ids: dict[str, str] = Field(default_factory=dict)
     concurrency: int = 4
     # Re-run rows that already have a result instead of skipping them.

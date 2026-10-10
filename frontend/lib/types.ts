@@ -143,6 +143,56 @@ export interface Template {
   created_at: string
 }
 
+export interface Objection {
+  objection: string
+  response: string
+}
+
+export interface AgentProfile {
+  offer: string
+  what_we_do: string
+  icp: string
+  proof_points: string[]
+  voice: string
+  sample_messages: string[]
+  objections: Objection[]
+  qualification: string
+  booking_link: string
+  never_claim: string[]
+  relevance_terms: string[]
+  output_mode: 'full_message' | 'personalized_line'
+  compact_research: boolean
+}
+
+export interface Agent {
+  id: string
+  lineage_id: string
+  name: string
+  profile: AgentProfile
+  version: number
+  is_active: boolean
+  created_at: string
+}
+
+export interface ChatAttachment {
+  name: string
+  text: string
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  text: string
+  attachments?: ChatAttachment[]
+}
+
+/** One server-sent event of an agent chat turn. */
+export type ChatEvent =
+  | { type: 'delta'; text: string }
+  | { type: 'reply_done' }
+  | { type: 'profile'; profile: AgentProfile; missing: string[]; done: boolean }
+  | { type: 'done' }
+  | { type: 'error'; message: string }
+
 export interface AiStatus {
   mode: 'oauth' | 'api_key' | 'claude_code'
   connected: boolean
@@ -202,11 +252,12 @@ export interface PreviewResult {
     tech_signals: { text: string; source_key: string }[]
   } | null
   angles: { angle: string; evidence: string; source_key: string }[]
-  draft: { subject: string | null; body: string } | null
+  draft: { subject: string | null; body: string; personal_line?: string | null } | null
   fit_established?: boolean | null
   fit_evidence?: string | null
   ask_first?: boolean
   thin_context: boolean
+  hold?: boolean
   reason: string
   warnings: string[]
   constraint_warning: string | null
