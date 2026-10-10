@@ -15,3 +15,6 @@ dist/
 # deploy/backup.sh output: database dumps and a copy of .env
 backups/
 *.tsbuildinfo
+
+# local session notes, not for the public repo
+SESSION_HAND*.md
